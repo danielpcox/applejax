@@ -1,5 +1,5 @@
 // Bitwise operations: and, or, xor, not, shift_left, shift_right_logical,
-// shift_right_arithmetic, popcnt
+// shift_right_arithmetic, popcnt, count_leading_zeros
 
 #import "pjrt_plugin/ops/registry.h"
 
@@ -181,6 +181,98 @@ static ProcessResult HandleShiftRightArithmetic(HandlerContext& ctx) {
     return Result(ctx, result, "shift_right_arithmetic");
 }
 REGISTER_MPS_OP("stablehlo.shift_right_arithmetic", HandleShiftRightArithmetic);
+
+// count_leading_zeros: counts the number of leading zero bits.
+// MPS doesn't have a native CLZ op, so we implement it using a binary search
+// approach with bitwise shifts and selects.
+static ProcessResult HandleCountLeadingZeros(HandlerContext& ctx) {
+    MPSGraphTensor* input = GetInputTensor(ctx, 0);
+    if (!input)
+        return ProcessResult::Error("clz: missing input tensor");
+
+    int bitWidth = getBitWidth(ctx.op);
+    if (bitWidth == 0)
+        return ProcessResult::Error("clz: could not determine bit width");
+
+    // Cast to unsigned for logical shift behavior
+    MPSDataType unsignedType = toUnsignedIntegerDataType(input.dataType);
+    if (unsignedType == MPSDataTypeInvalid)
+        return ProcessResult::Error("clz: unsupported data type");
+
+    MPSGraphTensor* x = input;
+    if (unsignedType != input.dataType)
+        x = [ctx.graph castTensor:input toType:unsignedType name:nil];
+
+    // Compute CLZ via: bitWidth - 1 - floor(log2(x)) for x > 0, bitWidth for x == 0.
+    // We use the float conversion trick: cast to float, extract the exponent.
+    // For int32, cast to float32 gives exact exponent for the highest set bit.
+    // floor(log2(x)) = exponent of float(x) - bias = exponent - 127 for float32.
+    //
+    // Note: float32 has 23-bit mantissa, so values up to 2^24 are exact.
+    // For larger values, the cast may round, but the exponent (and thus CLZ) is still correct
+    // because rounding only affects mantissa bits below the MSB.
+
+    MPSGraphTensor* zero = [ctx.graph constantWithScalar:0 shape:@[ @1 ] dataType:unsignedType];
+    MPSGraphTensor* isZero = [ctx.graph equalWithPrimaryTensor:x secondaryTensor:zero name:nil];
+
+    // Compute CLZ using float conversion: floor(log2(x)) gives MSB position.
+    // Precision issue: float32 has 24-bit mantissa, so for 32-bit integers near
+    // powers of 2, float(x) may round up to the next power of 2, giving log2
+    // one too high. Fix: right-shift x by 1 and use (bitWidth - 2) - floor(log2(x>>1))
+    // for the top-bit case. Or simpler: compute via float, then verify by
+    // checking if (1 << (bitWidth-1-n)) > x (n was too small).
+
+    MPSGraphTensor* xFloat = [ctx.graph castTensor:x toType:MPSDataTypeFloat32 name:nil];
+    MPSGraphTensor* log2x = [ctx.graph logarithmBase2WithTensor:xFloat name:nil];
+    MPSGraphTensor* floorLog2 = [ctx.graph floorWithTensor:log2x name:nil];
+
+    MPSGraphTensor* bwMinus1F =
+        [ctx.graph constantWithScalar:(bitWidth - 1) shape:@[ @1 ] dataType:MPSDataTypeFloat32];
+    MPSGraphTensor* clzFloat = [ctx.graph subtractionWithPrimaryTensor:bwMinus1F
+                                                       secondaryTensor:floorLog2
+                                                                  name:nil];
+    MPSGraphTensor* n = [ctx.graph castTensor:clzFloat toType:unsignedType name:nil];
+
+    // Correction for float32 rounding: when float(x) rounds up to 2^(k+1),
+    // log2 gives k+1 instead of k, so n is one too small.
+    // Check: if x >> (bitWidth - 1 - n) == 0, then n should be n + 1.
+    // (The MSB isn't actually at position bitWidth-1-n.)
+    MPSGraphTensor* bwMinus1 =
+        [ctx.graph constantWithScalar:(bitWidth - 1) shape:@[ @1 ] dataType:unsignedType];
+    MPSGraphTensor* msbPos = [ctx.graph subtractionWithPrimaryTensor:bwMinus1
+                                                     secondaryTensor:n
+                                                                name:nil];
+    MPSGraphTensor* checkBit = [ctx.graph bitwiseRightShiftWithPrimaryTensor:x
+                                                             secondaryTensor:msbPos
+                                                                        name:nil];
+    MPSGraphTensor* needsCorrection = [ctx.graph equalWithPrimaryTensor:checkBit
+                                                         secondaryTensor:zero
+                                                                    name:nil];
+    MPSGraphTensor* one = [ctx.graph constantWithScalar:1 shape:@[ @1 ] dataType:unsignedType];
+    MPSGraphTensor* nPlusOne = [ctx.graph additionWithPrimaryTensor:n
+                                                    secondaryTensor:one
+                                                               name:nil];
+    n = [ctx.graph selectWithPredicateTensor:needsCorrection
+                         truePredicateTensor:nPlusOne
+                        falsePredicateTensor:n
+                                        name:nil];
+
+    // For x == 0, CLZ = bitWidth
+    MPSGraphTensor* bitWidthTensor =
+        [ctx.graph constantWithScalar:bitWidth shape:@[ @1 ] dataType:unsignedType];
+    n = [ctx.graph selectWithPredicateTensor:isZero
+                         truePredicateTensor:bitWidthTensor
+                        falsePredicateTensor:n
+                                        name:nil];
+
+    // Cast back to original type
+    MPSDataType outType = GetResultMpsType(ctx.op);
+    if (outType != MPSDataTypeInvalid && n.dataType != outType)
+        n = [ctx.graph castTensor:n toType:outType name:nil];
+
+    return Result(ctx, n, "clz");
+}
+REGISTER_MPS_OP("stablehlo.count_leading_zeros", HandleCountLeadingZeros);
 
 static ProcessResult HandlePopcnt(HandlerContext& ctx) {
     MPSGraphTensor* input = GetInputTensor(ctx, 0);
