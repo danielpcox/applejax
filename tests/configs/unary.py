@@ -204,4 +204,40 @@ def make_unary_op_configs():
             ),
             differentiable_argnums=(),
         ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray([0, 1, 2, 4, 127, -1, -128], dtype=numpy.int8),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray([0, 1, 127, 128, 255], dtype=numpy.uint8),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray([0, 1, 255, 256, 32767, -1], dtype=numpy.int16),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray([0, 1, 255, 256, 32767, 65535], dtype=numpy.uint16),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray(
+                [0, 1, 2, 127, 128, 255, 256, 2147483647, -1, -2],
+                dtype=numpy.int32,
+            ),
+            differentiable_argnums=(),
+        ),
+        OperationTestConfig(
+            lax.clz,
+            numpy.asarray(
+                [0, 1, 2, 255, 256, 65535, 2147483647],
+                dtype=numpy.uint32,
+            ),
+            differentiable_argnums=(),
+        ),
     ]
