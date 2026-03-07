@@ -160,6 +160,13 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (4, 4)),
                 name="multi_index_point_gather",
             ),
+            # Multi-dim indexing with offset: x[i, j] on rank-3 tensor
+            # Produces gather with collapsed_slice_dims=(0,1), offset_dims=(1,)
+            OperationTestConfig(
+                lambda x: x[jnp.array([0, 1, 2]), jnp.array([1, 2, 0])],
+                lambda key: random.normal(key, (5, 4, 3)),
+                name="multi_dim_indexing_with_offset",
+            ),
             # Diagonal gather with offset dims: jnp.diagonal on batched tensor
             OperationTestConfig(
                 lambda x: jnp.diagonal(x, axis1=-1, axis2=-2),
