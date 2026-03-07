@@ -367,4 +367,44 @@ def make_slice_op_configs():
                 differentiable_argnums=(0,),
                 name="last_token_ce_grad",
             ),
+            # Boolean point scatter: .at[idx].set(value) for bool arrays
+            OperationTestConfig(
+                lambda x: x.at[2].set(False),
+                numpy.array([True, False, True, False, True]),
+                differentiable_argnums=(),
+                name="bool_scatter_point",
+            ),
+            # Boolean slice scatter: .at[1:3].set(value) for bool arrays
+            OperationTestConfig(
+                lambda x: x.at[1:3].set(False),
+                numpy.array([True, True, True, True, True]),
+                differentiable_argnums=(),
+                name="bool_scatter_slice",
+            ),
+            # Slice scatter (DUS pattern): .at[start:end].set(value)
+            OperationTestConfig(
+                lambda x: x.at[1:3].set(0),
+                numpy.array([1, 1, 1, 1, 1], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="int_scatter_slice",
+            ),
+            # Float slice scatter
+            OperationTestConfig(
+                lambda x: x.at[2:7].set(0.0),
+                lambda key: random.normal(key, (10,)),
+                name="float_scatter_slice",
+            ),
+            # 2D slice scatter
+            OperationTestConfig(
+                lambda x: x.at[1:3, :].set(0.0),
+                lambda key: random.normal(key, (4, 4)),
+                name="float_scatter_slice_2d",
+            ),
+            # unique (depends on boolean scatter internally)
+            OperationTestConfig(
+                lambda x: jnp.unique(x, size=4, fill_value=0),
+                numpy.array([3, 1, 2, 1, 3, 2, 4], dtype=numpy.int32),
+                differentiable_argnums=(),
+                name="unique_basic",
+            ),
         ]
