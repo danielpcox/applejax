@@ -183,3 +183,30 @@ def make_linalg_op_configs():
             ),
             marks=[xfail_match("Zero-sized tensors are not supported by MPS")],
         )
+
+        # --- solve and inv (use LU decomposition + triangular_solve internally) ---
+
+        # jnp.linalg.solve: A x = b
+        for n in [2, 3, 4]:
+            yield OperationTestConfig(
+                jnp.linalg.solve,
+                lambda key, n=n: _random_posdef(key, n),
+                lambda key, n=n: random.normal(key, (n, 1)),
+                name=f"solve_{n}x{n}",
+            )
+
+        # solve with multiple RHS columns
+        yield OperationTestConfig(
+            jnp.linalg.solve,
+            lambda key: _random_posdef(key, 3),
+            lambda key: random.normal(key, (3, 4)),
+            name="solve_3x3_multi_rhs",
+        )
+
+        # jnp.linalg.inv
+        for n in [2, 3, 4]:
+            yield OperationTestConfig(
+                jnp.linalg.inv,
+                lambda key, n=n: _random_posdef(key, n),
+                name=f"inv_{n}x{n}",
+            )

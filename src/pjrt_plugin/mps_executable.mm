@@ -289,17 +289,23 @@ bool MpsExecutable::BuildExecutionPlan() {
                     if (!callee || callee.empty())
                         continue;
 
-                    // Only inline callees that contain native ops.
-                    bool has_native = false;
+                    // Inline callees that contain native ops or nested func.call
+                    // ops (which may transitively contain native ops). The outer
+                    // while(changed) loop ensures we keep inlining until all
+                    // transitive native ops are exposed in the entry block.
+                    bool should_inline = false;
                     callee.walk([&](mlir::Operation* inner) {
-                        if (has_native)
+                        if (should_inline)
                             return;
                         std::string inner_name = inner->getName().getStringRef().str();
                         const OpHandler* h = OpRegistry::Find(inner_name);
-                        if (h && h->is_native())
-                            has_native = true;
+                        if (h && h->is_native()) {
+                            should_inline = true;
+                        } else if (mlir::dyn_cast<mlir::func::CallOp>(inner)) {
+                            should_inline = true;
+                        }
                     });
-                    if (!has_native)
+                    if (!should_inline)
                         continue;
 
                     // Clone the callee's body into the caller.
