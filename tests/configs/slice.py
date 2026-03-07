@@ -226,6 +226,21 @@ def make_slice_op_configs():
                 numpy.int64(2**62),
                 name="large_int64_scatter",
             ),
+            # Integer scatter-add regression test: verifies int32 scatter-add
+            # produces correct results (not zeros from bitcast float arithmetic)
+            OperationTestConfig(
+                lambda x, idx: x.at[idx].add(1),
+                numpy.zeros(5, dtype=numpy.int32),
+                numpy.array([0, 2, 4], dtype=numpy.int32),
+                name="int32_scatter_add",
+            ),
+            # Large integer scatter-add: verify values > 2^24 aren't corrupted
+            OperationTestConfig(
+                lambda x, idx: x.at[idx].add(numpy.int32(16777217)),
+                numpy.zeros(5, dtype=numpy.int32),
+                numpy.int32(2),
+                name="large_int32_scatter_add",
+            ),
             # Multi-dim index scatter: scatter values along diagonal of a matrix
             # Exercises general ScatterND with multi-point, multi-dim index vectors
             # indices shape [N, K] where N=4 scatter points, K=2 index dims
