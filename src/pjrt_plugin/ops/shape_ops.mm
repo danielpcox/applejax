@@ -791,16 +791,29 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
 
             // Convert multi-dim indices to flat indices using strides.
             // indices shape: [N, k] where k = number of indexed dims
-            // Compute strides for the indexed dims (in their original order per start_index_map)
-            llvm::SmallVector<int64_t> indexedDimSizes;
-            for (int64_t d : startIndexMap) {
-                indexedDimSizes.push_back([operand.shape[(NSUInteger)d] integerValue]);
+            // After transpose, indexed dims are in sorted (ascending) order.
+            // Compute strides in sorted order, then map back to startIndexMap order.
+            llvm::SmallVector<int64_t> sortedDimSizes;
+            for (int64_t d : sortedMap) {
+                sortedDimSizes.push_back([operand.shape[(NSUInteger)d] integerValue]);
             }
 
-            // Compute strides (row-major within the indexed dims)
-            llvm::SmallVector<int64_t> strides(startIndexMap.size(), 1);
-            for (int i = (int)startIndexMap.size() - 2; i >= 0; --i) {
-                strides[i] = strides[i + 1] * indexedDimSizes[i + 1];
+            // Compute row-major strides for the sorted indexed dims
+            llvm::SmallVector<int64_t> sortedStrides(sortedMap.size(), 1);
+            for (int i = (int)sortedMap.size() - 2; i >= 0; --i) {
+                sortedStrides[i] = sortedStrides[i + 1] * sortedDimSizes[i + 1];
+            }
+
+            // Map strides back to startIndexMap order: for each index column i,
+            // find where startIndexMap[i] sits in sortedMap to get the correct stride.
+            llvm::SmallVector<int64_t> strides(startIndexMap.size());
+            for (size_t i = 0; i < startIndexMap.size(); ++i) {
+                for (size_t j = 0; j < sortedMap.size(); ++j) {
+                    if (sortedMap[j] == startIndexMap[i]) {
+                        strides[i] = sortedStrides[j];
+                        break;
+                    }
+                }
             }
 
             MPSGraphTensor* indicesInt = EnsureInt32(ctx.graph, startIndices);

@@ -356,10 +356,8 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
                 rhsT = [ctx.graph transposeTensor:rhs permutation:rhsPerm name:nil];
             }
 
-            // Handle no-batch case: use batch dim of 1
-            if (batchProduct == 0) batchProduct = 1;
-
             // Reshape to 3D: [B, M, K] × [B, K, N]
+            // When no batch dims, batchProduct is 1 (initialized value).
             lhsT = [ctx.graph reshapeTensor:lhsT
                                    withShape:@[@(batchProduct), @(lhsFreeProduct), @(contractProduct)]
                                         name:nil];
@@ -381,7 +379,6 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
     }
 
     // Scalar broadcast: one or both operands are scalars with no contracting dims.
-    // This is effectively element-wise multiplication with broadcasting.
     if (!result && lhsContractingDims.empty() && rhsContractingDims.empty() &&
         lhsBatchDims.empty() && rhsBatchDims.empty() && (lhsRank == 0 || rhsRank == 0)) {
         result = [ctx.graph multiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
