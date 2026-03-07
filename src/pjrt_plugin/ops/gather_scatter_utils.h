@@ -22,11 +22,14 @@ inline bool NeedsBitcastWorkaround(MPSDataType type) {
            type == MPSDataTypeUInt64;
 }
 
+inline bool IsBoolType(MPSDataType type) { return type == MPSDataTypeBool; }
+
 inline bool Is64BitInteger(MPSDataType type) {
     return type == MPSDataTypeInt64 || type == MPSDataTypeUInt64;
 }
 
 // Prepare a tensor for gather/scatter by bitcasting integers to float32.
+// Also handles booleans, which MPS scatter silently ignores.
 // Returns the prepared tensor, and sets the output parameters for reversal.
 inline MPSGraphTensor* PrepareIntegerTensor(MPSGraph* graph, MPSGraphTensor* input,
                                             MPSDataType& originalType, bool& needsReverse,
@@ -34,6 +37,13 @@ inline MPSGraphTensor* PrepareIntegerTensor(MPSGraph* graph, MPSGraphTensor* inp
     originalType = input.dataType;
     needsReverse = (originalType == MPSDataTypeInt32 || originalType == MPSDataTypeUInt32);
     is64Bit = Is64BitInteger(originalType);
+
+    // MPS scatter operations silently fail on boolean tensors.
+    // Cast to int8 so scatter works, then cast back in FinalizeIntegerTensor.
+    if (IsBoolType(originalType)) {
+        input = [graph castTensor:input toType:MPSDataTypeInt8 name:@"bool_to_int8"];
+        return input;
+    }
 
     if (is64Bit) {
         // Reshape input: [shape...] -> [shape..., 2] treating each 64-bit as two 32-bits
@@ -58,6 +68,11 @@ inline MPSGraphTensor* PrepareIntegerTensor(MPSGraph* graph, MPSGraphTensor* inp
 inline MPSGraphTensor* FinalizeIntegerTensor(MPSGraph* graph, MPSGraphTensor* result,
                                              MPSDataType originalType, bool needsReverse,
                                              bool is64Bit) {
+    // Reverse the bool->int8 cast from PrepareIntegerTensor.
+    if (IsBoolType(originalType)) {
+        return [graph castTensor:result toType:MPSDataTypeBool name:@"int8_to_bool"];
+    }
+
     if (needsReverse) {
         // MPS reinterpret_cast doesn't work on scalar tensors (rank 0).
         // If the result is a scalar, reshape to [1], cast, then reshape back.

@@ -1637,6 +1637,23 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
                                          length:1 name:nil];
                     idx = EnsureInt32(ctx.graph, idx);
 
+                    // Build sequential indices: start_idx + 0, start_idx + 1, ...
+                    // scatter_along_axis places each update at its index, so we need
+                    // [start, start+1, ..., start+winSize-1] along the scatter dim.
+                    int64_t winSize = [updates.shape[(NSUInteger)realScatterDim] integerValue];
+                    std::vector<int32_t> offsetBuf(winSize);
+                    for (int64_t i = 0; i < winSize; i++) offsetBuf[i] = (int32_t)i;
+                    NSData* offsetData = [NSData dataWithBytes:offsetBuf.data()
+                                                        length:winSize * sizeof(int32_t)];
+                    MPSGraphTensor* offsets =
+                        [ctx.graph constantWithData:offsetData
+                                              shape:@[@(winSize)]
+                                           dataType:MPSDataTypeInt32];
+                    // idx is [1], offsets is [winSize] → add gives [winSize]
+                    idx = [ctx.graph additionWithPrimaryTensor:idx
+                                              secondaryTensor:offsets
+                                                         name:nil];
+
                     // Reshape index to match updates shape for scatter_along_axis:
                     // updates is [d0, d1, ..., dk] and we scatter along realScatterDim
                     NSMutableArray<NSNumber*>* idxShape = [NSMutableArray array];
@@ -1644,7 +1661,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
                         [idxShape addObject:((int64_t)d == realScatterDim) ?
                             updates.shape[d] : @1];
                     }
-                    idx = [ctx.graph broadcastTensor:idx toShape:idxShape name:nil];
+                    idx = [ctx.graph reshapeTensor:idx withShape:idxShape name:nil];
                     idx = [ctx.graph broadcastTensor:idx toShape:updates.shape name:nil];
 
                     MPSGraphTensor* result = SafeScatterAlongAxis(
