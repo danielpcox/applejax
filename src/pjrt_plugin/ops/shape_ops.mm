@@ -544,8 +544,16 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
         [indicesShape[indicesRank - 1] integerValue] == 1) {
         int64_t gatherAxis = startIndexMap[0];
 
-        // Build indices shape matching operand rank: insert size-1 dims for non-batch,
-        // non-axis dims. For operand [batch, D] with axis=1, indices should be [batch, 1].
+        // Compute total gather points N from indices dims between batch and index_vector_dim.
+        // Indices shape: [batch..., N..., 1] where N dims are the gather dimensions.
+        NSUInteger batchCount = operandBatchingDims.size();
+        int64_t numGatherPoints = 1;
+        for (NSUInteger i = batchCount; i < indicesRank - 1; ++i) {
+            numGatherPoints *= [indicesShape[i] integerValue];
+        }
+
+        // Build indices shape matching operand rank: batch dims get batch sizes,
+        // gather axis gets N, other dims get 1 (for broadcasting).
         NSMutableArray<NSNumber*>* expandedShape = [NSMutableArray array];
         NSUInteger operandRank = operand.shape.count;
         for (NSUInteger d = 0; d < operandRank; d++) {
@@ -558,6 +566,8 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
             }
             if (isBatchDim) {
                 [expandedShape addObject:operand.shape[d]];
+            } else if ((int64_t)d == gatherAxis) {
+                [expandedShape addObject:@(numGatherPoints)];
             } else {
                 [expandedShape addObject:@1];
             }
@@ -994,6 +1004,25 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
             // Just use them directly (index_vector_dim semantics: the last dim
             // is the index coordinate, which has size 1 for single-dim scatter).
         }
+
+        // scatterAlongAxis requires all tensors to have the same rank.
+        // When squeezing produced fewer dims than input (e.g. vmap pattern:
+        // input [3,5], indices squeezed from [3,1] to [3]), expand back.
+        NSUInteger inputRank = input.shape.count;
+        if (scatterIdx.shape.count < inputRank) {
+            NSMutableArray<NSNumber*>* expandedShape =
+                [NSMutableArray arrayWithArray:scatterIdx.shape];
+            [expandedShape insertObject:@1 atIndex:static_cast<NSUInteger>(scatterAxis)];
+            scatterIdx = [ctx.graph reshapeTensor:scatterIdx withShape:expandedShape name:nil];
+        }
+        if (scatterUpdates.shape.count < inputRank) {
+            NSMutableArray<NSNumber*>* expandedShape =
+                [NSMutableArray arrayWithArray:scatterUpdates.shape];
+            [expandedShape insertObject:@1 atIndex:static_cast<NSUInteger>(scatterAxis)];
+            scatterUpdates =
+                [ctx.graph reshapeTensor:scatterUpdates withShape:expandedShape name:nil];
+        }
+
         scatterIdx = EnsureInt32(ctx.graph, scatterIdx);
 
         MPSGraphScatterMode mode = GetScatterMode(scatterOp);
