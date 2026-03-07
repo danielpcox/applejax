@@ -845,6 +845,17 @@ bool MpsExecutable::BuildExecutionPlan() {
                     MPSDataType mps_dtype = tensorType ? MlirTypeToMps(tensorType.getElementType())
                                                        : MPSDataTypeFloat32;
 
+                    if (mps_dtype == MPSDataTypeInvalid) {
+                        std::string type_str;
+                        llvm::raw_string_ostream os(type_str);
+                        operand.getType().print(os);
+                        error_ = "MPS does not support dtype in tensor type " + type_str +
+                                 ". Metal GPUs only support float32 and narrower types "
+                                 "(float16, bfloat16). Use jax.config.update('jax_default_dtype_float', 'float32') "
+                                 "or avoid enabling x64 mode.";
+                        return;
+                    }
+
                     MPSGraphTensor* placeholder = [graph placeholderWithShape:shape
                                                                      dataType:mps_dtype
                                                                          name:nil];
@@ -869,6 +880,11 @@ bool MpsExecutable::BuildExecutionPlan() {
                     });
                 }
                 MPS_LOG_DEBUG("BuildExecutionPlan: created %zu placeholders\n", created_ph.size());
+
+                // Check if placeholder creation set an error (e.g., unsupported dtype)
+                if (!error_.empty()) {
+                    return false;
+                }
 
                 // Process ops within this segment
                 MPS_LOG_DEBUG("BuildExecutionPlan: processing ops in segment\n");

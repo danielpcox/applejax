@@ -26,7 +26,7 @@ Time per step (second half): 0.991
 
 ## What Works
 
-**All JAX operations are supported**, verified across 1974 tests covering all major categories:
+**All JAX operations are supported**, verified across 1978 tests covering all major categories:
 
 | Category | Status | Notes |
 |----------|--------|-------|

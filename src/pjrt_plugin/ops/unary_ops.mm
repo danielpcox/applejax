@@ -326,6 +326,19 @@ static ProcessResult HandleReducePrecision(HandlerContext& ctx) {
     // Step 1: Bitcast float32 → int32 (reinterpret bits)
     MPSGraphTensor* bits = [g reinterpretCastTensor:input toType:MPSDataTypeInt32 name:nil];
 
+    // Detect NaN upfront: NaN has exponent 0xFF and nonzero mantissa.
+    // We must preserve NaN through both mantissa rounding (which can overflow
+    // NaN's mantissa into the exponent/sign) and exponent clamping.
+    MPSGraphTensor* magMask = [g constantWithScalar:0x7FFFFFFF dataType:MPSDataTypeInt32];
+    MPSGraphTensor* inputMagnitude = [g bitwiseANDWithPrimaryTensor:bits
+                                                     secondaryTensor:magMask
+                                                                name:nil];
+    MPSGraphTensor* infBits = [g constantWithScalar:0x7F800000 dataType:MPSDataTypeInt32];
+    MPSGraphTensor* isNaN = [g greaterThanWithPrimaryTensor:inputMagnitude
+                                            secondaryTensor:infBits
+                                                       name:nil];
+    MPSGraphTensor* originalBits = bits;
+
     // Step 2: Round and truncate mantissa
     if (mantissa_bits < FLOAT32_MANTISSA_BITS) {
         int shift = FLOAT32_MANTISSA_BITS - mantissa_bits;
@@ -364,7 +377,6 @@ static ProcessResult HandleReducePrecision(HandlerContext& ctx) {
         MPSGraphTensor* signBit = [g bitwiseANDWithPrimaryTensor:bits
                                                  secondaryTensor:signMask
                                                             name:nil];
-        MPSGraphTensor* magMask = [g constantWithScalar:0x7FFFFFFF dataType:MPSDataTypeInt32];
         MPSGraphTensor* magnitude = [g bitwiseANDWithPrimaryTensor:bits
                                                    secondaryTensor:magMask
                                                               name:nil];
@@ -390,13 +402,8 @@ static ProcessResult HandleReducePrecision(HandlerContext& ctx) {
         MPSGraphTensor* maxMag = [g constantWithScalar:max_magnitude dataType:MPSDataTypeInt32];
         MPSGraphTensor* minMag = [g constantWithScalar:min_magnitude dataType:MPSDataTypeInt32];
 
-        // Detect NaN: magnitude > inf magnitude (0x7F800000) — must preserve NaN
-        MPSGraphTensor* inf = [g constantWithScalar:0x7F800000 dataType:MPSDataTypeInt32];
-        MPSGraphTensor* isNaN = [g greaterThanWithPrimaryTensor:magnitude
-                                                secondaryTensor:inf
-                                                           name:nil];
-
-        // Overflow: magnitude > max → set to inf (NaN excluded below)
+        // Overflow: magnitude > max → set to inf
+        MPSGraphTensor* inf = infBits;
         MPSGraphTensor* isOverflow = [g greaterThanWithPrimaryTensor:magnitude
                                                      secondaryTensor:maxMag
                                                                 name:nil];
@@ -424,16 +431,18 @@ static ProcessResult HandleReducePrecision(HandlerContext& ctx) {
                                              name:nil];
 
         // Recombine sign and magnitude
-        magnitude = [g selectWithPredicateTensor:isNaN
-                              truePredicateTensor:[g bitwiseANDWithPrimaryTensor:bits
-                                                                 secondaryTensor:magMask
-                                                                            name:nil]
-                             falsePredicateTensor:magnitude
-                                             name:nil];
         bits = [g bitwiseORWithPrimaryTensor:signBit secondaryTensor:magnitude name:nil];
     }
 
-    // Step 4: Bitcast int32 → float32
+    // Step 4: Restore original bits for NaN values (NaN must pass through unchanged).
+    // This handles both mantissa rounding overflow (e.g., mantissa_bits=0 can overflow
+    // NaN's mantissa into sign bit) and exponent clamping (NaN exponent > max).
+    bits = [g selectWithPredicateTensor:isNaN
+                      truePredicateTensor:originalBits
+                     falsePredicateTensor:bits
+                                     name:nil];
+
+    // Step 5: Bitcast int32 → float32
     MPSGraphTensor* result = [g reinterpretCastTensor:bits toType:MPSDataTypeFloat32 name:nil];
 
     return Result(ctx, result, "reduce_precision");

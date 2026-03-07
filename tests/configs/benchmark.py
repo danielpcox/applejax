@@ -91,3 +91,29 @@ def make_benchmark_op_configs() -> Generator[OperationTestConfig]:
                 lambda key, h=hidden: random.normal(key, (32, 128, h)),
                 name=f"layernorm_{hidden}",
             )
+
+        # Multi-head attention: key transformer pattern.
+        def multi_head_attention(q, k, v):
+            # q, k, v: (batch, heads, seq_len, head_dim)
+            scale = q.shape[-1] ** -0.5
+            attn = jnp.matmul(q, jnp.swapaxes(k, -2, -1)) * scale
+            attn = jax.nn.softmax(attn, axis=-1)
+            return jnp.matmul(attn, v)
+
+        for seq_len in [64, 256]:
+            yield OperationTestConfig(
+                multi_head_attention,
+                lambda key, s=seq_len: random.normal(key, (4, 8, s, 64)),
+                lambda key, s=seq_len: random.normal(key, (4, 8, s, 64)),
+                lambda key, s=seq_len: random.normal(key, (4, 8, s, 64)),
+                name=f"attention_seq{seq_len}",
+            )
+
+        # Larger matmul: ImageNet-scale FC layers.
+        for m, n, k in [(1024, 1024, 1024), (2048, 2048, 2048)]:
+            yield OperationTestConfig(
+                jnp.matmul,
+                lambda key, m=m, k=k: random.normal(key, (m, k)),
+                lambda key, k=k, n=n: random.normal(key, (k, n)),
+                name=f"matmul_{m}x{k}x{n}",
+            )
