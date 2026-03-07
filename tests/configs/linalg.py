@@ -16,6 +16,15 @@ def _random_posdef(key, n: int, batch_shape: tuple[int, ...] = ()):
     return result
 
 
+def _random_complex_posdef(key, n: int, batch_shape: tuple[int, ...] = ()):
+    """Generate random Hermitian positive-definite complex matrices."""
+    shape = (*batch_shape, n, n)
+    k1, k2 = random.split(key)
+    A = random.normal(k1, shape) + 1j * random.normal(k2, shape)
+    result = jnp.einsum("...ij,...kj->...ik", A, A.conj()) + n * jnp.eye(n, dtype=jnp.float32)
+    return result
+
+
 def _solve_triangular_lower(L, B):
     return solve_triangular(L, B, lower=True)
 
@@ -340,6 +349,38 @@ def make_linalg_op_configs():
             name="qr_Q_3x5",
         )
 
+        # Complex QR decomposition
+        for m, n in [(4, 3), (3, 3)]:
+            yield OperationTestConfig(
+                lambda x: jnp.linalg.qr(x)[0],
+                lambda key, m=m, n=n: (
+                    random.normal(key, (m, n))
+                    + 1j * random.normal(random.split(key)[0], (m, n))
+                ),
+                differentiable_argnums=(),
+                name=f"qr_Q_complex_{m}x{n}",
+            )
+            yield OperationTestConfig(
+                lambda x: jnp.linalg.qr(x)[1],
+                lambda key, m=m, n=n: (
+                    random.normal(key, (m, n))
+                    + 1j * random.normal(random.split(key)[0], (m, n))
+                ),
+                differentiable_argnums=(),
+                name=f"qr_R_complex_{m}x{n}",
+            )
+
+        # Batched complex QR
+        yield OperationTestConfig(
+            lambda x: jnp.linalg.qr(x)[0],
+            lambda key: (
+                random.normal(key, (2, 4, 3))
+                + 1j * random.normal(random.split(key)[0], (2, 4, 3))
+            ),
+            differentiable_argnums=(),
+            name="qr_Q_complex_batched",
+        )
+
         # --- Symmetric eigendecomposition (via Accelerate LAPACK) ---
 
         # eigh: eigenvalues only
@@ -358,6 +399,29 @@ def make_linalg_op_configs():
                 differentiable_argnums=(0,),
                 name=f"eigh_values_{n}x{n}",
             )
+
+        # Complex eigh (Hermitian eigendecomposition)
+        for n in [2, 3, 4]:
+            yield OperationTestConfig(
+                jnp.linalg.eigvalsh,
+                lambda key, n=n: _random_complex_posdef(key, n),
+                differentiable_argnums=(),
+                name=f"eigvalsh_complex_{n}x{n}",
+            )
+            yield OperationTestConfig(
+                lambda x: jnp.linalg.eigh(x)[0],
+                lambda key, n=n: _random_complex_posdef(key, n),
+                differentiable_argnums=(),
+                name=f"eigh_values_complex_{n}x{n}",
+            )
+
+        # Batched complex eigh
+        yield OperationTestConfig(
+            jnp.linalg.eigvalsh,
+            lambda key: _random_complex_posdef(key, 3, batch_shape=(2,)),
+            differentiable_argnums=(),
+            name="eigvalsh_complex_batched",
+        )
 
         # --- det and slogdet (use LU internally) ---
 
@@ -437,6 +501,51 @@ def make_linalg_op_configs():
                 differentiable_argnums=(0,),
                 name=f"svd_s_batched_{batch_str}",
             )
+
+        # Complex SVD
+        for n in [2, 3, 4]:
+            yield OperationTestConfig(
+                lambda x: jnp.linalg.svd(x, full_matrices=False)[1],
+                lambda key, n=n: (
+                    random.normal(key, (n, n))
+                    + 1j * random.normal(random.split(key)[0], (n, n))
+                ),
+                differentiable_argnums=(),
+                name=f"svd_s_complex_{n}x{n}",
+            )
+
+        # Complex SVD tall/wide
+        yield OperationTestConfig(
+            lambda x: jnp.linalg.svd(x, full_matrices=False)[1],
+            lambda key: (
+                random.normal(key, (4, 3))
+                + 1j * random.normal(random.split(key)[0], (4, 3))
+            ),
+            differentiable_argnums=(),
+            name="svd_s_complex_tall_4x3",
+        )
+
+        # Complex SVD full matrices
+        yield OperationTestConfig(
+            lambda x: jnp.linalg.svd(x, full_matrices=True)[1],
+            lambda key: (
+                random.normal(key, (3, 3))
+                + 1j * random.normal(random.split(key)[0], (3, 3))
+            ),
+            differentiable_argnums=(),
+            name="svd_s_complex_full_3x3",
+        )
+
+        # Batched complex SVD
+        yield OperationTestConfig(
+            lambda x: jnp.linalg.svd(x, full_matrices=False)[1],
+            lambda key: (
+                random.normal(key, (2, 3, 3))
+                + 1j * random.normal(random.split(key)[0], (2, 3, 3))
+            ),
+            differentiable_argnums=(),
+            name="svd_s_complex_batched",
+        )
 
         # --- pinv (uses SVD internally) ---
 

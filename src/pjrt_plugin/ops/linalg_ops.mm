@@ -600,9 +600,6 @@ static NativeResult NativeHandle_Qr(id<MTLDevice> device, id<MTLCommandBuffer> c
     if (shape.size() < 2)
         return NativeResult::Error("Qr: expected at least rank 2");
 
-    if (!inputType.getElementType().isF32())
-        return NativeResult::Error("Qr: only float32 supported");
-
     int64_t m = shape[shape.size() - 2];
     int64_t n = shape[shape.size() - 1];
     int64_t k = std::min(m, n);
@@ -612,8 +609,13 @@ static NativeResult NativeHandle_Qr(id<MTLDevice> device, id<MTLCommandBuffer> c
     for (size_t i = 0; i < shape.size() - 2; i++)
         batchSize *= shape[i];
 
-    size_t matrixSize = (size_t)(m * n) * sizeof(float);
-    size_t tauSize = (size_t)k * sizeof(float);
+    bool isComplex = mlir::isa<mlir::ComplexType>(inputType.getElementType());
+    size_t elemSize = isComplex ? sizeof(float) * 2 : sizeof(float);
+    size_t matrixSize = (size_t)(m * n) * elemSize;
+    size_t tauSize = (size_t)k * elemSize;
+
+    if (!isComplex && !inputType.getElementType().isF32())
+        return NativeResult::Error("Qr: only float32 and complex64 supported");
 
     // Allocate output buffers
     size_t totalMatrixSize = (size_t)batchSize * matrixSize;
@@ -624,52 +626,68 @@ static NativeResult NativeHandle_Qr(id<MTLDevice> device, id<MTLCommandBuffer> c
     id<MTLBuffer> outTau = [device newBufferWithLength:totalTauSize
                                                options:MTLResourceStorageModeShared];
 
-    // The execution engine flushes pending GPU work before native steps,
-    // so input data is available in shared memory.
-
     // Copy input to output (LAPACK works in-place)
     memcpy(outMatrix.contents, inputs[0].contents, totalMatrixSize);
 
-    // Process each batch element
-    for (int64_t b = 0; b < batchSize; b++) {
-        float* a = (float*)outMatrix.contents + b * m * n;
-        float* tau = (float*)outTau.contents + b * k;
+    if (isComplex) {
+        for (int64_t b = 0; b < batchSize; b++) {
+            auto* a = (std::complex<float>*)outMatrix.contents + b * m * n;
+            auto* tau = (std::complex<float>*)outTau.contents + b * k;
 
-        // LAPACK uses column-major, but JAX uses row-major.
-        // sgeqrf on row-major A is equivalent to LQ on column-major A.
-        // We transpose in place, call sgeqrf, and transpose back.
-        // For simplicity, we transpose M×N → N×M, call sgeqrf(N, M), get taus of size k.
+            std::vector<std::complex<float>> temp(m * n);
+            for (int64_t i = 0; i < m; i++)
+                for (int64_t j = 0; j < n; j++)
+                    temp[j * m + i] = a[i * n + j];
 
-        // Transpose in-place: allocate temp buffer
-        std::vector<float> temp(m * n);
+            __CLPK_integer lm = (__CLPK_integer)m;
+            __CLPK_integer ln = (__CLPK_integer)n;
+            __CLPK_integer lda = (__CLPK_integer)m;
+            __CLPK_integer info = 0;
+            __CLPK_integer lwork = -1;
 
-        // Row-major A[i,j] = a[i*n + j] → column-major A[i,j] = temp[j*m + i]
-        // Equivalently: transpose to get A^T in row-major = A in column-major
-        for (int64_t i = 0; i < m; i++)
-            for (int64_t j = 0; j < n; j++)
-                temp[j * m + i] = a[i * n + j];
+            std::complex<float> work_query;
+            cgeqrf_(&lm, &ln, (__CLPK_complex*)temp.data(), &lda, (__CLPK_complex*)tau,
+                    (__CLPK_complex*)&work_query, &lwork, &info);
+            lwork = (__CLPK_integer)work_query.real();
+            std::vector<std::complex<float>> work(lwork);
+            cgeqrf_(&lm, &ln, (__CLPK_complex*)temp.data(), &lda, (__CLPK_complex*)tau,
+                    (__CLPK_complex*)work.data(), &lwork, &info);
+            if (info != 0)
+                return NativeResult::Error("Qr: cgeqrf failed with info=" + std::to_string(info));
 
-        __CLPK_integer lm = (__CLPK_integer)m;
-        __CLPK_integer ln = (__CLPK_integer)n;
-        __CLPK_integer lda = (__CLPK_integer)m;  // leading dim for column-major (m×n in col-major = m)
-        __CLPK_integer info = 0;
-        __CLPK_integer lwork = -1;
+            for (int64_t i = 0; i < m; i++)
+                for (int64_t j = 0; j < n; j++)
+                    a[i * n + j] = temp[j * m + i];
+        }
+    } else {
+        // Process each batch element (float32 path)
+        for (int64_t b = 0; b < batchSize; b++) {
+            float* a = (float*)outMatrix.contents + b * m * n;
+            float* tau = (float*)outTau.contents + b * k;
 
-        // Query optimal workspace
-        float work_query;
-        sgeqrf_(&lm, &ln, temp.data(), &lda, tau, &work_query, &lwork, &info);
-        lwork = (__CLPK_integer)work_query;
-        std::vector<float> work(lwork);
+            std::vector<float> temp(m * n);
+            for (int64_t i = 0; i < m; i++)
+                for (int64_t j = 0; j < n; j++)
+                    temp[j * m + i] = a[i * n + j];
 
-        // Compute QR
-        sgeqrf_(&lm, &ln, temp.data(), &lda, tau, work.data(), &lwork, &info);
-        if (info != 0)
-            return NativeResult::Error("Qr: sgeqrf failed with info=" + std::to_string(info));
+            __CLPK_integer lm = (__CLPK_integer)m;
+            __CLPK_integer ln = (__CLPK_integer)n;
+            __CLPK_integer lda = (__CLPK_integer)m;
+            __CLPK_integer info = 0;
+            __CLPK_integer lwork = -1;
 
-        // Transpose back: column-major result → row-major
-        for (int64_t i = 0; i < m; i++)
-            for (int64_t j = 0; j < n; j++)
-                a[i * n + j] = temp[j * m + i];
+            float work_query;
+            sgeqrf_(&lm, &ln, temp.data(), &lda, tau, &work_query, &lwork, &info);
+            lwork = (__CLPK_integer)work_query;
+            std::vector<float> work(lwork);
+            sgeqrf_(&lm, &ln, temp.data(), &lda, tau, work.data(), &lwork, &info);
+            if (info != 0)
+                return NativeResult::Error("Qr: sgeqrf failed with info=" + std::to_string(info));
+
+            for (int64_t i = 0; i < m; i++)
+                for (int64_t j = 0; j < n; j++)
+                    a[i * n + j] = temp[j * m + i];
+        }
     }
 
     return NativeResult::Buffers({outMatrix, outTau});
@@ -704,9 +722,6 @@ static NativeResult NativeHandle_HouseholderProduct(id<MTLDevice> device,
     if (shape.size() < 2)
         return NativeResult::Error("HouseholderProduct: expected at least rank 2");
 
-    if (!inputType.getElementType().isF32())
-        return NativeResult::Error("HouseholderProduct: only float32 supported");
-
     int64_t m = shape[shape.size() - 2];
     int64_t n = shape[shape.size() - 1];
     int64_t k = tauType.getShape().back();
@@ -715,60 +730,93 @@ static NativeResult NativeHandle_HouseholderProduct(id<MTLDevice> device,
     for (size_t i = 0; i < shape.size() - 2; i++)
         batchSize *= shape[i];
 
-    // Output shape matches input shape
+    bool isComplex = mlir::isa<mlir::ComplexType>(inputType.getElementType());
+    if (!isComplex && !inputType.getElementType().isF32())
+        return NativeResult::Error("HouseholderProduct: only float32 and complex64 supported");
+
+    size_t elemSize = isComplex ? sizeof(float) * 2 : sizeof(float);
+
     auto outType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
     auto outShape = outType.getShape();
     int64_t outM = outShape[outShape.size() - 2];
     int64_t outN = outShape[outShape.size() - 1];
 
-    size_t outMatrixSize = (size_t)(outM * outN) * sizeof(float);
+    size_t outMatrixSize = (size_t)(outM * outN) * elemSize;
     size_t totalOutSize = (size_t)batchSize * outMatrixSize;
 
     id<MTLBuffer> outBuf = [device newBufferWithLength:totalOutSize
                                                options:MTLResourceStorageModeShared];
 
-    // Copy packed QR input to output (sorgqr works in-place)
-    size_t inputMatrixSize = (size_t)(m * n) * sizeof(float);
-    size_t tauBatchSize = (size_t)k * sizeof(float);
+    if (isComplex) {
+        for (int64_t b = 0; b < batchSize; b++) {
+            const auto* aIn = (const std::complex<float>*)inputs[0].contents + b * m * n;
+            const auto* tauIn = (const std::complex<float>*)inputs[1].contents + b * k;
+            auto* out = (std::complex<float>*)outBuf.contents + b * outM * outN;
 
-    for (int64_t b = 0; b < batchSize; b++) {
-        const float* aIn = (const float*)inputs[0].contents + b * m * n;
-        const float* tauIn = (const float*)inputs[1].contents + b * k;
-        float* out = (float*)outBuf.contents + b * outM * outN;
+            std::vector<std::complex<float>> temp(m * n);
+            for (int64_t i = 0; i < m; i++)
+                for (int64_t j = 0; j < n; j++)
+                    temp[j * m + i] = aIn[i * n + j];
 
-        // Transpose to column-major for LAPACK
-        std::vector<float> temp(m * n);
-        for (int64_t i = 0; i < m; i++)
-            for (int64_t j = 0; j < n; j++)
-                temp[j * m + i] = aIn[i * n + j];
+            std::vector<std::complex<float>> tau(k);
+            memcpy(tau.data(), tauIn, k * sizeof(std::complex<float>));
 
-        // Copy tau (1D, no transpose needed)
-        std::vector<float> tau(k);
-        memcpy(tau.data(), tauIn, k * sizeof(float));
+            __CLPK_integer lm = (__CLPK_integer)m;
+            __CLPK_integer ln = (__CLPK_integer)n;
+            __CLPK_integer lk = (__CLPK_integer)k;
+            __CLPK_integer lda = (__CLPK_integer)m;
+            __CLPK_integer info = 0;
+            __CLPK_integer lwork = -1;
 
-        __CLPK_integer lm = (__CLPK_integer)m;
-        __CLPK_integer ln = (__CLPK_integer)n;
-        __CLPK_integer lk = (__CLPK_integer)k;
-        __CLPK_integer lda = (__CLPK_integer)m;
-        __CLPK_integer info = 0;
-        __CLPK_integer lwork = -1;
+            std::complex<float> work_query;
+            cungqr_(&lm, &ln, &lk, (__CLPK_complex*)temp.data(), &lda,
+                    (__CLPK_complex*)tau.data(), (__CLPK_complex*)&work_query, &lwork, &info);
+            lwork = (__CLPK_integer)work_query.real();
+            std::vector<std::complex<float>> work(lwork);
+            cungqr_(&lm, &ln, &lk, (__CLPK_complex*)temp.data(), &lda,
+                    (__CLPK_complex*)tau.data(), (__CLPK_complex*)work.data(), &lwork, &info);
+            if (info != 0)
+                return NativeResult::Error("HouseholderProduct: cungqr failed with info=" +
+                                           std::to_string(info));
 
-        // Query workspace
-        float work_query;
-        sorgqr_(&lm, &ln, &lk, temp.data(), &lda, tau.data(), &work_query, &lwork, &info);
-        lwork = (__CLPK_integer)work_query;
-        std::vector<float> work(lwork);
+            for (int64_t i = 0; i < outM; i++)
+                for (int64_t j = 0; j < outN; j++)
+                    out[i * outN + j] = temp[j * m + i];
+        }
+    } else {
+        for (int64_t b = 0; b < batchSize; b++) {
+            const float* aIn = (const float*)inputs[0].contents + b * m * n;
+            const float* tauIn = (const float*)inputs[1].contents + b * k;
+            float* out = (float*)outBuf.contents + b * outM * outN;
 
-        // Compute Q
-        sorgqr_(&lm, &ln, &lk, temp.data(), &lda, tau.data(), work.data(), &lwork, &info);
-        if (info != 0)
-            return NativeResult::Error("HouseholderProduct: sorgqr failed with info=" +
-                                       std::to_string(info));
+            std::vector<float> temp(m * n);
+            for (int64_t i = 0; i < m; i++)
+                for (int64_t j = 0; j < n; j++)
+                    temp[j * m + i] = aIn[i * n + j];
 
-        // Transpose back: column-major → row-major
-        for (int64_t i = 0; i < outM; i++)
-            for (int64_t j = 0; j < outN; j++)
-                out[i * outN + j] = temp[j * m + i];
+            std::vector<float> tau(k);
+            memcpy(tau.data(), tauIn, k * sizeof(float));
+
+            __CLPK_integer lm = (__CLPK_integer)m;
+            __CLPK_integer ln = (__CLPK_integer)n;
+            __CLPK_integer lk = (__CLPK_integer)k;
+            __CLPK_integer lda = (__CLPK_integer)m;
+            __CLPK_integer info = 0;
+            __CLPK_integer lwork = -1;
+
+            float work_query;
+            sorgqr_(&lm, &ln, &lk, temp.data(), &lda, tau.data(), &work_query, &lwork, &info);
+            lwork = (__CLPK_integer)work_query;
+            std::vector<float> work(lwork);
+            sorgqr_(&lm, &ln, &lk, temp.data(), &lda, tau.data(), work.data(), &lwork, &info);
+            if (info != 0)
+                return NativeResult::Error("HouseholderProduct: sorgqr failed with info=" +
+                                           std::to_string(info));
+
+            for (int64_t i = 0; i < outM; i++)
+                for (int64_t j = 0; j < outN; j++)
+                    out[i * outN + j] = temp[j * m + i];
+        }
     }
 
     return NativeResult::Buffer(outBuf);
@@ -800,17 +848,19 @@ static NativeResult NativeHandle_Syevd(id<MTLDevice> device, id<MTLCommandBuffer
     auto shape = inputType.getShape();
     if (shape.size() < 2)
         return NativeResult::Error("Syevd: expected at least rank 2");
-    if (!inputType.getElementType().isF32())
-        return NativeResult::Error("Syevd: only float32 supported");
-
     int64_t n = shape[shape.size() - 1];
 
     int64_t batchSize = 1;
     for (size_t i = 0; i < shape.size() - 2; i++)
         batchSize *= shape[i];
 
-    size_t matrixSize = (size_t)(n * n) * sizeof(float);
-    size_t eigenvalSize = (size_t)n * sizeof(float);
+    bool isComplex = mlir::isa<mlir::ComplexType>(inputType.getElementType());
+    if (!isComplex && !inputType.getElementType().isF32())
+        return NativeResult::Error("Syevd: only float32 and complex64 supported");
+
+    size_t matrixElemSize = isComplex ? sizeof(float) * 2 : sizeof(float);
+    size_t matrixSize = (size_t)(n * n) * matrixElemSize;
+    size_t eigenvalSize = (size_t)n * sizeof(float);  // eigenvalues are always real
     size_t totalMatrixSize = (size_t)batchSize * matrixSize;
     size_t totalEigenvalSize = (size_t)batchSize * eigenvalSize;
 
@@ -819,47 +869,86 @@ static NativeResult NativeHandle_Syevd(id<MTLDevice> device, id<MTLCommandBuffer
     id<MTLBuffer> outValues = [device newBufferWithLength:totalEigenvalSize
                                                   options:MTLResourceStorageModeShared];
 
-    // Copy input (ssyevd works in-place, overwrites with eigenvectors)
     memcpy(outVectors.contents, inputs[0].contents, totalMatrixSize);
 
-    for (int64_t b = 0; b < batchSize; b++) {
-        float* a = (float*)outVectors.contents + b * n * n;
-        float* w = (float*)outValues.contents + b * n;
+    if (isComplex) {
+        for (int64_t b = 0; b < batchSize; b++) {
+            auto* a = (std::complex<float>*)outVectors.contents + b * n * n;
+            float* w = (float*)outValues.contents + b * n;
 
-        // Transpose to column-major for LAPACK
-        std::vector<float> temp(n * n);
-        for (int64_t i = 0; i < n; i++)
-            for (int64_t j = 0; j < n; j++)
-                temp[j * n + i] = a[i * n + j];
+            std::vector<std::complex<float>> temp(n * n);
+            for (int64_t i = 0; i < n; i++)
+                for (int64_t j = 0; j < n; j++)
+                    temp[j * n + i] = a[i * n + j];
 
-        char jobz = 'V';  // Compute eigenvalues and eigenvectors
-        char uplo = 'L';  // Lower triangle
-        __CLPK_integer ln = (__CLPK_integer)n;
-        __CLPK_integer lda = (__CLPK_integer)n;
-        __CLPK_integer info = 0;
-        __CLPK_integer lwork = -1;
-        __CLPK_integer liwork = -1;
+            char jobz = 'V';
+            char uplo = 'L';
+            __CLPK_integer ln = (__CLPK_integer)n;
+            __CLPK_integer lda = (__CLPK_integer)n;
+            __CLPK_integer info = 0;
+            __CLPK_integer lwork = -1;
+            __CLPK_integer lrwork = -1;
+            __CLPK_integer liwork = -1;
 
-        // Query workspace
-        float work_query;
-        __CLPK_integer iwork_query;
-        ssyevd_(&jobz, &uplo, &ln, temp.data(), &lda, w, &work_query, &lwork, &iwork_query, &liwork,
-                &info);
-        lwork = (__CLPK_integer)work_query;
-        liwork = iwork_query;
-        std::vector<float> work(lwork);
-        std::vector<__CLPK_integer> iwork(liwork);
+            std::complex<float> work_query;
+            float rwork_query;
+            __CLPK_integer iwork_query;
+            cheevd_(&jobz, &uplo, &ln, (__CLPK_complex*)temp.data(), &lda, w,
+                    (__CLPK_complex*)&work_query, &lwork, &rwork_query, &lrwork,
+                    &iwork_query, &liwork, &info);
+            lwork = (__CLPK_integer)work_query.real();
+            lrwork = (__CLPK_integer)rwork_query;
+            liwork = iwork_query;
+            std::vector<std::complex<float>> work(lwork);
+            std::vector<float> rwork(lrwork);
+            std::vector<__CLPK_integer> iwork(liwork);
 
-        // Compute eigendecomposition
-        ssyevd_(&jobz, &uplo, &ln, temp.data(), &lda, w, work.data(), &lwork, iwork.data(), &liwork,
-                &info);
-        if (info != 0)
-            return NativeResult::Error("Syevd: ssyevd failed with info=" + std::to_string(info));
+            cheevd_(&jobz, &uplo, &ln, (__CLPK_complex*)temp.data(), &lda, w,
+                    (__CLPK_complex*)work.data(), &lwork, rwork.data(), &lrwork,
+                    iwork.data(), &liwork, &info);
+            if (info != 0)
+                return NativeResult::Error("Syevd: cheevd failed with info=" + std::to_string(info));
 
-        // Transpose eigenvectors back: column-major → row-major
-        for (int64_t i = 0; i < n; i++)
-            for (int64_t j = 0; j < n; j++)
-                a[i * n + j] = temp[j * n + i];
+            for (int64_t i = 0; i < n; i++)
+                for (int64_t j = 0; j < n; j++)
+                    a[i * n + j] = temp[j * n + i];
+        }
+    } else {
+        for (int64_t b = 0; b < batchSize; b++) {
+            float* a = (float*)outVectors.contents + b * n * n;
+            float* w = (float*)outValues.contents + b * n;
+
+            std::vector<float> temp(n * n);
+            for (int64_t i = 0; i < n; i++)
+                for (int64_t j = 0; j < n; j++)
+                    temp[j * n + i] = a[i * n + j];
+
+            char jobz = 'V';
+            char uplo = 'L';
+            __CLPK_integer ln = (__CLPK_integer)n;
+            __CLPK_integer lda = (__CLPK_integer)n;
+            __CLPK_integer info = 0;
+            __CLPK_integer lwork = -1;
+            __CLPK_integer liwork = -1;
+
+            float work_query;
+            __CLPK_integer iwork_query;
+            ssyevd_(&jobz, &uplo, &ln, temp.data(), &lda, w, &work_query, &lwork,
+                    &iwork_query, &liwork, &info);
+            lwork = (__CLPK_integer)work_query;
+            liwork = iwork_query;
+            std::vector<float> work(lwork);
+            std::vector<__CLPK_integer> iwork(liwork);
+
+            ssyevd_(&jobz, &uplo, &ln, temp.data(), &lda, w, work.data(), &lwork,
+                    iwork.data(), &liwork, &info);
+            if (info != 0)
+                return NativeResult::Error("Syevd: ssyevd failed with info=" + std::to_string(info));
+
+            for (int64_t i = 0; i < n; i++)
+                for (int64_t j = 0; j < n; j++)
+                    a[i * n + j] = temp[j * n + i];
+        }
     }
 
     return NativeResult::Buffers({outVectors, outValues});
@@ -891,8 +980,9 @@ static NativeResult NativeHandle_Sgesdd(id<MTLDevice> device, id<MTLCommandBuffe
     auto shape = inputType.getShape();
     if (shape.size() < 2)
         return NativeResult::Error("Sgesdd: expected at least rank 2");
-    if (!inputType.getElementType().isF32())
-        return NativeResult::Error("Sgesdd: only float32 supported");
+    bool isComplex = mlir::isa<mlir::ComplexType>(inputType.getElementType());
+    if (!inputType.getElementType().isF32() && !isComplex)
+        return NativeResult::Error("Sgesdd: only float32 and complex64 supported");
 
     int64_t m = shape[shape.size() - 2];
     int64_t n = shape[shape.size() - 1];
@@ -918,10 +1008,11 @@ static NativeResult NativeHandle_Sgesdd(id<MTLDevice> device, id<MTLCommandBuffe
     for (size_t i = 0; i < shape.size() - 2; i++)
         batchSize *= shape[i];
 
-    size_t inputMatrixSize = (size_t)(m * n) * sizeof(float);
-    size_t sSize = (size_t)k * sizeof(float);
-    size_t uSize = (size_t)(uRows * uCols) * sizeof(float);
-    size_t vtSize = (size_t)(vtRows * vtCols) * sizeof(float);
+    // Element size: 8 bytes for complex64 (two floats), 4 bytes for float32
+    size_t elemSize = isComplex ? sizeof(float) * 2 : sizeof(float);
+    size_t sSize = (size_t)k * sizeof(float);  // singular values are always real
+    size_t uSize = (size_t)(uRows * uCols) * elemSize;
+    size_t vtSize = (size_t)(vtRows * vtCols) * elemSize;
 
     id<MTLBuffer> outS = [device newBufferWithLength:(size_t)batchSize * sSize
                                               options:MTLResourceStorageModeShared];
@@ -931,23 +1022,11 @@ static NativeResult NativeHandle_Sgesdd(id<MTLDevice> device, id<MTLCommandBuffe
                                                options:MTLResourceStorageModeShared];
 
     for (int64_t b = 0; b < batchSize; b++) {
-        const float* aIn = (const float*)inputs[0].contents + b * m * n;
         float* s = (float*)outS.contents + b * k;
-        float* u = (float*)outU.contents + b * uRows * uCols;
-        float* vt = (float*)outVt.contents + b * vtRows * vtCols;
-
-        // Transpose input to column-major for LAPACK
-        std::vector<float> aCm(m * n);
-        for (int64_t i = 0; i < m; i++)
-            for (int64_t j = 0; j < n; j++)
-                aCm[j * m + i] = aIn[i * n + j];
 
         // LAPACK output dimensions (column-major)
-        // U is m×ucols in column-major, Vt is vtrows×n in column-major
         int64_t lapack_ucols = full_matrices ? m : k;
         int64_t lapack_vtrows = full_matrices ? n : k;
-        std::vector<float> uCm(m * lapack_ucols);
-        std::vector<float> vtCm(lapack_vtrows * n);
 
         char jobz = full_matrices ? 'A' : 'S';
         __CLPK_integer lm = (__CLPK_integer)m;
@@ -957,35 +1036,108 @@ static NativeResult NativeHandle_Sgesdd(id<MTLDevice> device, id<MTLCommandBuffe
         __CLPK_integer ldvt = (__CLPK_integer)lapack_vtrows;
         __CLPK_integer info = 0;
         __CLPK_integer lwork = -1;
-
-        // Query optimal workspace
-        float work_query;
-        __CLPK_integer iwork_buf[8 * std::min(m, n)];
-        sgesdd_(&jobz, &lm, &ln, aCm.data(), &lda, s, uCm.data(), &ldu,
-                vtCm.data(), &ldvt, &work_query, &lwork, iwork_buf, &info);
-        lwork = (__CLPK_integer)work_query;
-        std::vector<float> work(lwork);
         std::vector<__CLPK_integer> iwork(8 * k);
 
-        // Compute SVD
-        sgesdd_(&jobz, &lm, &ln, aCm.data(), &lda, s, uCm.data(), &ldu,
-                vtCm.data(), &ldvt, work.data(), &lwork, iwork.data(), &info);
-        if (info != 0)
-            return NativeResult::Error("Sgesdd: sgesdd failed with info=" + std::to_string(info));
+        if (isComplex) {
+            const float* aInRaw = (const float*)inputs[0].contents + b * m * n * 2;
+            float* u = (float*)outU.contents + b * uRows * uCols * 2;
+            float* vt = (float*)outVt.contents + b * vtRows * vtCols * 2;
 
-        // Transpose U from column-major to row-major
-        // LAPACK U (col-major): m × lapack_ucols, U[i,j] = uCm[j*m + i]
-        // Output U (row-major): uRows × uCols
-        for (int64_t i = 0; i < uRows; i++)
-            for (int64_t j = 0; j < uCols; j++)
-                u[i * uCols + j] = uCm[j * m + i];
+            // Transpose input to column-major (each element is 2 floats)
+            std::vector<float> aCm(m * n * 2);
+            for (int64_t i = 0; i < m; i++)
+                for (int64_t j = 0; j < n; j++) {
+                    aCm[(j * m + i) * 2] = aInRaw[(i * n + j) * 2];
+                    aCm[(j * m + i) * 2 + 1] = aInRaw[(i * n + j) * 2 + 1];
+                }
 
-        // Transpose Vt from column-major to row-major
-        // LAPACK Vt (col-major): lapack_vtrows × n, Vt[i,j] = vtCm[j*lapack_vtrows + i]
-        // Output Vt (row-major): vtRows × vtCols
-        for (int64_t i = 0; i < vtRows; i++)
-            for (int64_t j = 0; j < vtCols; j++)
-                vt[i * vtCols + j] = vtCm[j * lapack_vtrows + i];
+            std::vector<float> uCm(m * lapack_ucols * 2);
+            std::vector<float> vtCm(lapack_vtrows * n * 2);
+
+            // Query optimal workspace
+            __CLPK_complex work_query;
+            float rwork_query;
+            __CLPK_integer lrwork = -1;
+            cgesdd_(&jobz, &lm, &ln, (__CLPK_complex*)aCm.data(), &lda, s,
+                    (__CLPK_complex*)uCm.data(), &ldu,
+                    (__CLPK_complex*)vtCm.data(), &ldvt,
+                    &work_query, &lwork, &rwork_query, iwork.data(), &info);
+            lwork = (__CLPK_integer)work_query.r;
+            std::vector<__CLPK_complex> work(lwork);
+
+            // rwork size for cgesdd_
+            int64_t mn_min = std::min(m, n);
+            int64_t mn_max = std::max(m, n);
+            __CLPK_integer lrwork_val;
+            if (jobz == 'N') {
+                lrwork_val = 7 * mn_min;
+            } else {
+                lrwork_val = std::max(5 * mn_min * mn_min + 5 * mn_min,
+                                      2 * mn_max * mn_min + 2 * mn_min * mn_min + mn_min);
+            }
+            std::vector<float> rwork(lrwork_val);
+
+            // Compute complex SVD
+            cgesdd_(&jobz, &lm, &ln, (__CLPK_complex*)aCm.data(), &lda, s,
+                    (__CLPK_complex*)uCm.data(), &ldu,
+                    (__CLPK_complex*)vtCm.data(), &ldvt,
+                    work.data(), &lwork, rwork.data(), iwork.data(), &info);
+            if (info != 0)
+                return NativeResult::Error("Sgesdd: cgesdd failed with info=" +
+                                           std::to_string(info));
+
+            // Transpose U from column-major to row-major (complex)
+            for (int64_t i = 0; i < uRows; i++)
+                for (int64_t j = 0; j < uCols; j++) {
+                    u[(i * uCols + j) * 2] = uCm[(j * m + i) * 2];
+                    u[(i * uCols + j) * 2 + 1] = uCm[(j * m + i) * 2 + 1];
+                }
+
+            // Transpose Vt from column-major to row-major (complex)
+            for (int64_t i = 0; i < vtRows; i++)
+                for (int64_t j = 0; j < vtCols; j++) {
+                    vt[(i * vtCols + j) * 2] = vtCm[(j * lapack_vtrows + i) * 2];
+                    vt[(i * vtCols + j) * 2 + 1] = vtCm[(j * lapack_vtrows + i) * 2 + 1];
+                }
+        } else {
+            const float* aIn = (const float*)inputs[0].contents + b * m * n;
+            float* u = (float*)outU.contents + b * uRows * uCols;
+            float* vt = (float*)outVt.contents + b * vtRows * vtCols;
+
+            // Transpose input to column-major for LAPACK
+            std::vector<float> aCm(m * n);
+            for (int64_t i = 0; i < m; i++)
+                for (int64_t j = 0; j < n; j++)
+                    aCm[j * m + i] = aIn[i * n + j];
+
+            std::vector<float> uCm(m * lapack_ucols);
+            std::vector<float> vtCm(lapack_vtrows * n);
+
+            // Query optimal workspace
+            float work_query;
+            __CLPK_integer iwork_buf[8 * std::min(m, n)];
+            sgesdd_(&jobz, &lm, &ln, aCm.data(), &lda, s, uCm.data(), &ldu,
+                    vtCm.data(), &ldvt, &work_query, &lwork, iwork_buf, &info);
+            lwork = (__CLPK_integer)work_query;
+            std::vector<float> work(lwork);
+
+            // Compute SVD
+            sgesdd_(&jobz, &lm, &ln, aCm.data(), &lda, s, uCm.data(), &ldu,
+                    vtCm.data(), &ldvt, work.data(), &lwork, iwork.data(), &info);
+            if (info != 0)
+                return NativeResult::Error("Sgesdd: sgesdd failed with info=" +
+                                           std::to_string(info));
+
+            // Transpose U from column-major to row-major
+            for (int64_t i = 0; i < uRows; i++)
+                for (int64_t j = 0; j < uCols; j++)
+                    u[i * uCols + j] = uCm[j * m + i];
+
+            // Transpose Vt from column-major to row-major
+            for (int64_t i = 0; i < vtRows; i++)
+                for (int64_t j = 0; j < vtCols; j++)
+                    vt[i * vtCols + j] = vtCm[j * lapack_vtrows + i];
+        }
     }
 
     return NativeResult::Buffers({outS, outU, outVt});
