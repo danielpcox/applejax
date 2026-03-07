@@ -99,21 +99,14 @@ def make_numpyro_op_configs():
                     differentiable_argnums=(1,),
                     name="Bernoulli",
                 ),
-                pytest.param(
-                    NumpyroDistributionTestConfig(
-                        dists.BinomialProbs,
-                        lambda key, bs=batch_shape: random.uniform(
-                            key, bs, minval=0.1, maxval=0.9
-                        ),
-                        10,  # total_count (not differentiable)
-                        differentiable_argnums=(1,),
-                        name="Binomial",
+                NumpyroDistributionTestConfig(
+                    dists.BinomialProbs,
+                    lambda key, bs=batch_shape: random.uniform(
+                        key, bs, minval=0.1, maxval=0.9
                     ),
-                    marks=[
-                        pytest.mark.skip(
-                            reason="Segfaults on MPS (issue #57). Works on CPU but crashes before exception can be raised."
-                        )
-                    ],
+                    10,  # total_count (not differentiable)
+                    differentiable_argnums=(1,),
+                    name="Binomial",
                 ),
                 NumpyroDistributionTestConfig(
                     dists.CategoricalProbs,
