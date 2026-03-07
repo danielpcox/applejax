@@ -229,9 +229,81 @@ static ProcessResult HandleCustomCall(HandlerContext& ctx) {
     return handler->graph_handler(ctx);
 }
 
+static ProcessResult HandleIfOp(HandlerContext& ctx) {
+    auto ifOp = mlir::dyn_cast<mlir::stablehlo::IfOp>(ctx.op);
+    if (!ifOp) {
+        return ProcessResult::Error("Expected stablehlo.if operation");
+    }
+
+    if (ctx.depth > 100) {
+        return ProcessResult::Error("Maximum call depth exceeded - possible recursive if");
+    }
+
+    MPSGraphTensor* pred = GetTensor(ctx.values, ifOp.getPred());
+    if (!pred) {
+        return ProcessResult::Error("stablehlo.if predicate tensor not found");
+    }
+
+    mlir::Region& trueRegion = ifOp.getTrueBranch();
+    mlir::Region& falseRegion = ifOp.getFalseBranch();
+    if (trueRegion.empty() || falseRegion.empty()) {
+        return ProcessResult::Error("stablehlo.if requires non-empty true/false branches");
+    }
+
+    // Evaluate both branches eagerly (MPS graph is declarative, not imperative)
+    auto evaluateBranch = [&](mlir::Region& region) -> std::pair<std::vector<MPSGraphTensor*>, std::string> {
+        mlir::Block& block = region.front();
+        ValueMap branchValues = ctx.values;
+
+        HandlerContext branchCtx(ctx.graph, nullptr, branchValues, ctx.module, ctx.depth + 1,
+                                 ctx.processBlock);
+        ProcessResult result = ctx.processBlock(branchCtx, block);
+        if (!result.ok()) {
+            return {{}, result.error};
+        }
+
+        std::vector<MPSGraphTensor*> outputs;
+        outputs.reserve(result.return_values.size());
+        for (mlir::Value value : result.return_values) {
+            MPSGraphTensor* t = GetTensor(branchValues, value);
+            if (!t) {
+                return {{}, "stablehlo.if branch return tensor not found"};
+            }
+            outputs.push_back(t);
+        }
+        return {outputs, ""};
+    };
+
+    auto [trueOutputs, trueError] = evaluateBranch(trueRegion);
+    if (!trueError.empty()) {
+        return ProcessResult::Error(trueError);
+    }
+
+    auto [falseOutputs, falseError] = evaluateBranch(falseRegion);
+    if (!falseError.empty()) {
+        return ProcessResult::Error(falseError);
+    }
+
+    if (trueOutputs.size() != ifOp->getNumResults() || falseOutputs.size() != ifOp->getNumResults()) {
+        return ProcessResult::Error("stablehlo.if branch result arity mismatch");
+    }
+
+    // Select between branches based on predicate
+    for (size_t i = 0; i < ifOp->getNumResults(); ++i) {
+        MPSGraphTensor* selected = [ctx.graph selectWithPredicateTensor:pred
+                                                    truePredicateTensor:trueOutputs[i]
+                                                   falsePredicateTensor:falseOutputs[i]
+                                                                   name:nil];
+        ctx.values[ifOp->getResult((unsigned)i).getAsOpaquePointer()] = selected;
+    }
+
+    return ProcessResult{};
+}
+
 // Register control flow ops as regular GRAPH ops
 REGISTER_MPS_OP("stablehlo.while", HandleWhileOp);
 REGISTER_MPS_OP("stablehlo.case", HandleCaseOp);
+REGISTER_MPS_OP("stablehlo.if", HandleIfOp);
 
 // Register custom_call as a regular GRAPH op - it dispatches to CustomCallRegistry internally
 REGISTER_MPS_OP("stablehlo.custom_call", HandleCustomCall);
