@@ -22,6 +22,10 @@ inline bool NeedsBitcastWorkaround(MPSDataType type) {
            type == MPSDataTypeUInt64;
 }
 
+inline bool IsComplexType(MPSDataType type) {
+    return type == MPSDataTypeComplexFloat32 || type == MPSDataTypeComplexFloat16;
+}
+
 inline bool IsBoolType(MPSDataType type) { return type == MPSDataTypeBool; }
 
 inline bool Is64BitInteger(MPSDataType type) {
@@ -106,9 +110,18 @@ inline MPSGraphTensor* FinalizeIntegerTensor(MPSGraph* graph, MPSGraphTensor* re
 }
 
 // Safe wrapper for gatherNDWithUpdatesTensor
-// Handles int32/uint32/int64/uint64 precision fix internally
+// Handles int32/uint32/int64/uint64 precision fix and complex type decomposition
 inline MPSGraphTensor* SafeGatherND(MPSGraph* graph, MPSGraphTensor* updatesTensor,
                                     MPSGraphTensor* indicesTensor, NSUInteger batchDimensions) {
+    // MPS gatherND doesn't support complex types - decompose into real/imag parts
+    if (IsComplexType(updatesTensor.dataType)) {
+        MPSGraphTensor* real = [graph realPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* imag = [graph imaginaryPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* realResult = SafeGatherND(graph, real, indicesTensor, batchDimensions);
+        MPSGraphTensor* imagResult = SafeGatherND(graph, imag, indicesTensor, batchDimensions);
+        return [graph complexTensorWithRealTensor:realResult imaginaryTensor:imagResult name:nil];
+    }
+
     MPSDataType originalType;
     bool needsReverse = false;
     bool is64Bit = false;
@@ -126,6 +139,14 @@ inline MPSGraphTensor* SafeGatherND(MPSGraph* graph, MPSGraphTensor* updatesTens
 inline MPSGraphTensor* SafeGather(MPSGraph* graph, MPSGraphTensor* updatesTensor,
                                   MPSGraphTensor* indicesTensor, NSUInteger axis,
                                   NSUInteger batchDimensions) {
+    if (IsComplexType(updatesTensor.dataType)) {
+        MPSGraphTensor* real = [graph realPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* imag = [graph imaginaryPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* realResult = SafeGather(graph, real, indicesTensor, axis, batchDimensions);
+        MPSGraphTensor* imagResult = SafeGather(graph, imag, indicesTensor, axis, batchDimensions);
+        return [graph complexTensorWithRealTensor:realResult imaginaryTensor:imagResult name:nil];
+    }
+
     MPSDataType originalType;
     bool needsReverse = false;
     bool is64Bit = false;
@@ -144,6 +165,14 @@ inline MPSGraphTensor* SafeGather(MPSGraph* graph, MPSGraphTensor* updatesTensor
 inline MPSGraphTensor* SafeGatherAlongAxis(MPSGraph* graph, NSInteger axis,
                                            MPSGraphTensor* updatesTensor,
                                            MPSGraphTensor* indicesTensor) {
+    if (IsComplexType(updatesTensor.dataType)) {
+        MPSGraphTensor* real = [graph realPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* imag = [graph imaginaryPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* realResult = SafeGatherAlongAxis(graph, axis, real, indicesTensor);
+        MPSGraphTensor* imagResult = SafeGatherAlongAxis(graph, axis, imag, indicesTensor);
+        return [graph complexTensorWithRealTensor:realResult imaginaryTensor:imagResult name:nil];
+    }
+
     MPSDataType originalType;
     bool needsReverse = false;
     bool is64Bit = false;
@@ -167,6 +196,18 @@ inline MPSGraphTensor* SafeGatherAlongAxis(MPSGraph* graph, NSInteger axis,
 inline MPSGraphTensor* SafeScatterND(MPSGraph* graph, MPSGraphTensor* dataTensor,
                                      MPSGraphTensor* updatesTensor, MPSGraphTensor* indicesTensor,
                                      NSUInteger batchDimensions, MPSGraphScatterMode mode) {
+    if (IsComplexType(dataTensor.dataType)) {
+        MPSGraphTensor* dataReal = [graph realPartOfTensor:dataTensor name:nil];
+        MPSGraphTensor* dataImag = [graph imaginaryPartOfTensor:dataTensor name:nil];
+        MPSGraphTensor* updReal = [graph realPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* updImag = [graph imaginaryPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* realResult =
+            SafeScatterND(graph, dataReal, updReal, indicesTensor, batchDimensions, mode);
+        MPSGraphTensor* imagResult =
+            SafeScatterND(graph, dataImag, updImag, indicesTensor, batchDimensions, mode);
+        return [graph complexTensorWithRealTensor:realResult imaginaryTensor:imagResult name:nil];
+    }
+
     if (mode != MPSGraphScatterModeSet) {
         return [graph scatterNDWithDataTensor:dataTensor
                                updatesTensor:updatesTensor
@@ -204,6 +245,18 @@ inline MPSGraphTensor* SafeScatterND(MPSGraph* graph, MPSGraphTensor* dataTensor
 inline MPSGraphTensor* SafeScatter(MPSGraph* graph, MPSGraphTensor* dataTensor,
                                    MPSGraphTensor* updatesTensor, MPSGraphTensor* indicesTensor,
                                    NSInteger axis, MPSGraphScatterMode mode) {
+    if (IsComplexType(dataTensor.dataType)) {
+        MPSGraphTensor* dataReal = [graph realPartOfTensor:dataTensor name:nil];
+        MPSGraphTensor* dataImag = [graph imaginaryPartOfTensor:dataTensor name:nil];
+        MPSGraphTensor* updReal = [graph realPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* updImag = [graph imaginaryPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* realResult =
+            SafeScatter(graph, dataReal, updReal, indicesTensor, axis, mode);
+        MPSGraphTensor* imagResult =
+            SafeScatter(graph, dataImag, updImag, indicesTensor, axis, mode);
+        return [graph complexTensorWithRealTensor:realResult imaginaryTensor:imagResult name:nil];
+    }
+
     if (mode != MPSGraphScatterModeSet) {
         return [graph scatterWithDataTensor:dataTensor
                               updatesTensor:updatesTensor
@@ -241,6 +294,18 @@ inline MPSGraphTensor* SafeScatterAlongAxis(MPSGraph* graph, NSInteger axis,
                                             MPSGraphTensor* updatesTensor,
                                             MPSGraphTensor* indicesTensor,
                                             MPSGraphScatterMode mode) {
+    if (IsComplexType(dataTensor.dataType)) {
+        MPSGraphTensor* dataReal = [graph realPartOfTensor:dataTensor name:nil];
+        MPSGraphTensor* dataImag = [graph imaginaryPartOfTensor:dataTensor name:nil];
+        MPSGraphTensor* updReal = [graph realPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* updImag = [graph imaginaryPartOfTensor:updatesTensor name:nil];
+        MPSGraphTensor* realResult =
+            SafeScatterAlongAxis(graph, axis, dataReal, updReal, indicesTensor, mode);
+        MPSGraphTensor* imagResult =
+            SafeScatterAlongAxis(graph, axis, dataImag, updImag, indicesTensor, mode);
+        return [graph complexTensorWithRealTensor:realResult imaginaryTensor:imagResult name:nil];
+    }
+
     if (mode != MPSGraphScatterModeSet) {
         return [graph scatterAlongAxis:axis
                         withDataTensor:dataTensor

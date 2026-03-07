@@ -208,6 +208,77 @@ def make_linalg_op_configs():
                 name=f"inv_{n}x{n}",
             )
 
+        # --- complex det (uses LU decomposition + complex gather/scatter) ---
+
+        for n in [2, 3, 4]:
+            yield OperationTestConfig(
+                jnp.linalg.det,
+                lambda key, n=n: random.normal(key, (n, n))
+                + 1j * random.normal(random.fold_in(key, 1), (n, n)),
+                differentiable_argnums=(),
+                name=f"det_complex_{n}x{n}",
+            )
+
+        # Batched complex det
+        yield OperationTestConfig(
+            jnp.linalg.det,
+            lambda key: random.normal(key, (2, 3, 3))
+            + 1j * random.normal(random.fold_in(key, 1), (2, 3, 3)),
+            differentiable_argnums=(),
+            name="det_complex_batched",
+        )
+
+        # Complex slogdet (log absolute det)
+        yield OperationTestConfig(
+            lambda x: jnp.linalg.slogdet(x)[1],
+            lambda key: random.normal(key, (3, 3))
+            + 1j * random.normal(random.fold_in(key, 1), (3, 3)),
+            differentiable_argnums=(),
+            name="slogdet_complex_3x3",
+        )
+
+        # Complex inv (uses LU + complex triangular_solve)
+        for n in [2, 3, 4]:
+            yield OperationTestConfig(
+                jnp.linalg.inv,
+                lambda key, n=n: (
+                    lambda A: A @ A.conj().T + n * jnp.eye(n)
+                )(
+                    random.normal(key, (n, n))
+                    + 1j * random.normal(random.fold_in(key, 1), (n, n))
+                ),
+                differentiable_argnums=(),
+                name=f"inv_complex_{n}x{n}",
+            )
+
+        # Complex solve
+        yield OperationTestConfig(
+            jnp.linalg.solve,
+            lambda key: (
+                lambda A: A @ A.conj().T + 3 * jnp.eye(3)
+            )(
+                random.normal(key, (3, 3))
+                + 1j * random.normal(random.fold_in(key, 1), (3, 3))
+            ),
+            lambda key: random.normal(key, (3, 1))
+            + 1j * random.normal(random.fold_in(key, 2), (3, 1)),
+            differentiable_argnums=(),
+            name="solve_complex_3x3",
+        )
+
+        # Batched complex inv
+        yield OperationTestConfig(
+            jnp.linalg.inv,
+            lambda key: (
+                lambda A: jnp.einsum("...ij,...kj->...ik", A, A.conj()) + 3 * jnp.eye(3)
+            )(
+                random.normal(key, (2, 3, 3))
+                + 1j * random.normal(random.fold_in(key, 1), (2, 3, 3))
+            ),
+            differentiable_argnums=(),
+            name="inv_complex_batched",
+        )
+
         # --- QR decomposition (via Accelerate LAPACK) ---
 
         # QR on tall matrices

@@ -329,6 +329,64 @@ static NativeResult NativeHandle_triangular_solve(id<MTLDevice> device, id<MTLCo
     int64_t bRows = bShape[bShape.size() - 2];
     int64_t bCols = bShape[bShape.size() - 1];
 
+    // Complex triangular solve via Accelerate BLAS ctrsm_
+    if (mlir::isa<mlir::ComplexType>(bType.getElementType())) {
+        bool adjoint = (transposeA == mlir::stablehlo::Transpose::ADJOINT);
+        size_t elem_size = sizeof(float) * 2;  // complex<float>
+        size_t bMatrixDataSize = (size_t)(bRows * bCols) * elem_size;
+        size_t totalOutSize = (size_t)batchSize * bMatrixDataSize;
+
+        id<MTLBuffer> outBuf = [device newBufferWithLength:totalOutSize
+                                                   options:MTLResourceStorageModeShared];
+
+        // The execution engine flushes pending GPU work before native steps,
+        // so input data is available in shared memory.
+        const auto* aData = (const std::complex<float>*)inputs[0].contents;
+        const auto* bData = (const std::complex<float>*)inputs[1].contents;
+        auto* outData = (std::complex<float>*)outBuf.contents;
+
+        // ctrsm_ parameters (Fortran column-major conventions)
+        char side = leftSide ? 'L' : 'R';
+        char uplo = lower ? 'L' : 'U';
+        char transa = adjoint ? 'C' : (transpose ? 'T' : 'N');
+        char diag = unitDiagonal ? 'U' : 'N';
+        std::complex<float> alpha(1.0f, 0.0f);
+
+        for (int64_t b = 0; b < batchSize; b++) {
+            const auto* aSrc = aData + b * n * n;
+            const auto* bSrc = bData + b * bRows * bCols;
+            auto* dst = outData + b * bRows * bCols;
+
+            // Transpose A (row-major -> column-major)
+            std::vector<std::complex<float>> aCm(n * n);
+            for (int64_t i = 0; i < n; i++)
+                for (int64_t j = 0; j < n; j++)
+                    aCm[j * n + i] = aSrc[i * n + j];
+
+            // Transpose B (row-major -> column-major), write into bCm
+            std::vector<std::complex<float>> bCm(bRows * bCols);
+            for (int64_t i = 0; i < bRows; i++)
+                for (int64_t j = 0; j < bCols; j++)
+                    bCm[j * bRows + i] = bSrc[i * bCols + j];
+
+            // ctrsm_ solves op(A) * X = alpha * B (left) or X * op(A) = alpha * B (right)
+            // B is overwritten with X.
+            int lm = leftSide ? (int)n : (int)bRows;
+            int ln = leftSide ? (int)bCols : (int)n;
+            int lda = (int)n;
+            int ldb = (int)bRows;
+            ctrsm_(&side, &uplo, &transa, &diag, &lm, &ln, (__CLPK_complex*)&alpha,
+                   (__CLPK_complex*)aCm.data(), &lda, (__CLPK_complex*)bCm.data(), &ldb);
+
+            // Transpose result back (column-major -> row-major)
+            for (int64_t i = 0; i < bRows; i++)
+                for (int64_t j = 0; j < bCols; j++)
+                    dst[i * bCols + j] = bCm[j * bRows + i];
+        }
+
+        return NativeResult::Buffer(outBuf);
+    }
+
     if (!bType.getElementType().isF32()) {
         return NativeResult::Error("triangular_solve: only float32 is supported");
     }
