@@ -462,4 +462,9 @@ static NativeResult NativeHandle_triangular_solve(id<MTLDevice> device, id<MTLCo
 
 REGISTER_NATIVE_MPS_OP("stablehlo.triangular_solve", NativeHandle_triangular_solve);
 
+// The native handler is used for triangular_solve. When it appears inside
+// func.call (e.g., in jnp.linalg.inv → @_lu_solve), the execution engine's
+// inline pass automatically inlines the callee so that segmented execution
+// can handle the native op properly.
+
 }  // namespace jax_mps
