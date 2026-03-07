@@ -964,6 +964,29 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
     auto scatterDimsToOperandDims = dimNumbers.getScatterDimsToOperandDims();
     auto inputBatchingDims = dimNumbers.getInputBatchingDims();
     auto scatterIndicesBatchingDims = dimNumbers.getScatterIndicesBatchingDims();
+
+    // Handle identity scatter: empty indices with full-window updates.
+    // This pattern occurs in LU decomposition where scatter effectively copies
+    // the entire updates tensor to the output (no actual scattering).
+    // Pattern: scatter_dims_to_operand_dims empty, inserted_window_dims empty,
+    // indices has 0 elements, update_window_dims covers all update dims.
+    if (scatterDimsToOperandDims.empty() && insertedWindowDims.empty() &&
+        inputBatchingDims.empty()) {
+        // With no scatter dims, 0 scatter points → output = data unchanged (Set mode)
+        // or output = data (with identity update computation).
+        // In practice, JAX uses this for full-tensor assignment: output = updates.
+        MPSGraphScatterMode mode = GetScatterMode(scatterOp);
+        if (mode == MPSGraphScatterModeSet) {
+            // Full-window set: output = updates (reshaped to match input if needed)
+            MPSGraphTensor* result = updates;
+            if (updates.shape.count != input.shape.count) {
+                result = [ctx.graph reshapeTensor:updates withShape:input.shape name:nil];
+            }
+            return Result(ctx, result, "scatter");
+        }
+        // For other modes (add, etc), identity scatter means output = data
+        return Result(ctx, input, "scatter");
+    }
     int64_t indexVectorDim = dimNumbers.getIndexVectorDim();
 
     NSArray<NSNumber*>* indicesShape = scatterIndices.shape;
