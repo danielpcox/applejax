@@ -1,6 +1,5 @@
 import jax
 import numpy
-import pytest
 from jax import lax, random
 from jax import numpy as jnp
 
@@ -271,50 +270,33 @@ def make_slice_op_configs():
                 name="scatter_multi_dim_diagonal_add_grad_updates",
             ),
             # Batched scatter using vmap - tests numStableHLOBatch > 0
-            # These crash due to incorrect handling of StableHLO batch dimensions
-            # in the general scatter fallback (reshape loses batch dims). See PR #49.
-            pytest.param(
-                OperationTestConfig(
-                    lambda x, idx, val: jax.vmap(lambda a, i, v: a.at[i].set(v))(
-                        x, idx, val
-                    ),
-                    lambda key: random.normal(key, (3, 5)),
-                    lambda key: random.randint(key, (3,), 0, 5),
-                    lambda key: random.normal(key, (3,)),
-                    differentiable_argnums=(0, 2),
-                    name="scatter_vmap_simple",
+            OperationTestConfig(
+                lambda x, idx, val: jax.vmap(lambda a, i, v: a.at[i].set(v))(
+                    x, idx, val
                 ),
-                marks=[
-                    pytest.mark.skip(reason="FIXME: crashes due to batched scatter bug")
-                ],
+                lambda key: random.normal(key, (3, 5)),
+                lambda key: random.randint(key, (3,), 0, 5),
+                lambda key: random.normal(key, (3,)),
+                differentiable_argnums=(0, 2),
+                name="scatter_vmap_simple",
             ),
-            pytest.param(
-                OperationTestConfig(
-                    lambda x, idx, val: jax.vmap(lambda a, i, v: a.at[i].add(v))(
-                        x, idx, val
-                    ),
-                    lambda key: jnp.zeros((3, 5), dtype=jnp.float32),
-                    lambda key: jnp.array([[0, 2], [1, 3], [2, 4]]),
-                    lambda key: random.normal(key, (3, 2)),
-                    differentiable_argnums=(0, 2),
-                    name="scatter_vmap_multi_point",
+            OperationTestConfig(
+                lambda x, idx, val: jax.vmap(lambda a, i, v: a.at[i].add(v))(
+                    x, idx, val
                 ),
-                marks=[
-                    pytest.mark.skip(reason="FIXME: crashes due to batched scatter bug")
-                ],
+                lambda key: jnp.zeros((3, 5), dtype=jnp.float32),
+                lambda key: jnp.array([[0, 2], [1, 3], [2, 4]]),
+                lambda key: random.normal(key, (3, 2)),
+                differentiable_argnums=(0, 2),
+                name="scatter_vmap_multi_point",
             ),
-            pytest.param(
-                OperationTestConfig(
-                    lambda x, vals: jax.vmap(
-                        lambda a, v: a.at[numpy.arange(2), numpy.arange(2)].add(v)
-                    )(x, vals),
-                    lambda key: jnp.zeros((3, 4, 4), dtype=jnp.float32),
-                    lambda key: random.normal(key, (3, 2)),
-                    differentiable_argnums=(0,),
-                    name="scatter_vmap_2d_diagonal",
-                ),
-                marks=[
-                    pytest.mark.skip(reason="FIXME: crashes due to batched scatter bug")
-                ],
+            OperationTestConfig(
+                lambda x, vals: jax.vmap(
+                    lambda a, v: a.at[numpy.arange(2), numpy.arange(2)].add(v)
+                )(x, vals),
+                lambda key: jnp.zeros((3, 4, 4), dtype=jnp.float32),
+                lambda key: random.normal(key, (3, 2)),
+                differentiable_argnums=(0,),
+                name="scatter_vmap_2d_diagonal",
             ),
         ]
