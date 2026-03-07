@@ -161,6 +161,18 @@ def make_slice_op_configs():
                 lambda key: random.normal(key, (4, 4)),
                 name="multi_index_point_gather",
             ),
+            # Diagonal gather with offset dims: jnp.diagonal on batched tensor
+            OperationTestConfig(
+                lambda x: jnp.diagonal(x, axis1=-1, axis2=-2),
+                lambda key: random.normal(key, (3, 4, 4)),
+                name="diagonal_gather_batched",
+            ),
+            # Diagonal gather on 2D tensor
+            OperationTestConfig(
+                lambda x: jnp.diagonal(x),
+                lambda key: random.normal(key, (5, 5)),
+                name="diagonal_gather_2d",
+            ),
             # Batched gather via vmap
             OperationTestConfig(
                 lambda x, idx: jax.vmap(

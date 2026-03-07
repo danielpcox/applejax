@@ -222,22 +222,13 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
     }
 
     // Batched case: both have same number of batch dims (>0) and single contraction
+    // with exactly one free dim per operand (standard batched matmul).
     if (!result && !lhsBatchDims.empty() && lhsBatchDims.size() == rhsBatchDims.size() &&
         lhsContractingDims.size() == 1 && rhsContractingDims.size() == 1) {
-        // Verify matmul-like semantics: exactly one free dimension per operand.
-        // Free dims = total dims - batch dims - contracting dims
         NSUInteger lhsFreeDims = lhsRank - lhsBatchDims.size() - lhsContractingDims.size();
         NSUInteger rhsFreeDims = rhsRank - rhsBatchDims.size() - rhsContractingDims.size();
-        if (lhsFreeDims != 1 || rhsFreeDims != 1) {
-            // Not matmul-like - batched operations with multiple free dimensions are not
-            // supported. MPS's matrixMultiplication expects exactly one free dim per operand
-            // (M for LHS, N for RHS) in addition to batch and contracting dimensions.
-            return ProcessResult::Error(
-                "dot_general: batched operations with multiple free dimensions are not "
-                "supported (LHS has " +
-                std::to_string(lhsFreeDims) + " free dims, RHS has " + std::to_string(rhsFreeDims) +
-                " free dims, expected 1 each)");
-        } else {
+        // Multiple free dims fall through to the general fallback below.
+        if (lhsFreeDims == 1 && rhsFreeDims == 1) {
             // Verify batch dimension sizes match
             bool batchSizesMatch = true;
             for (size_t i = 0; i < lhsBatchDims.size(); i++) {
@@ -283,14 +274,120 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
         }  // end else (matmul-like validation)
     }
 
-    // Fallback for unhandled cases - try simple matmul (may fail for incompatible shapes)
+    // General fallback: handles any dot_general with arbitrary batch, contracting,
+    // and free dims. Strategy: transpose to [batch, free, contract] × [batch, contract, free],
+    // flatten each group, do 3D batched matmul [B,M,K]×[B,K,N], reshape to output.
+    // Output order per StableHLO spec: [batch..., lhs_free..., rhs_free...]
+    if (!result && !lhsContractingDims.empty()) {
+        llvm::SmallDenseSet<int64_t, 4> lhsBatchSet(lhsBatchDims.begin(), lhsBatchDims.end());
+        llvm::SmallDenseSet<int64_t, 4> rhsBatchSet(rhsBatchDims.begin(), rhsBatchDims.end());
+        llvm::SmallDenseSet<int64_t, 4> lhsContractSet(lhsContractingDims.begin(),
+                                                         lhsContractingDims.end());
+        llvm::SmallDenseSet<int64_t, 4> rhsContractSet(rhsContractingDims.begin(),
+                                                         rhsContractingDims.end());
+
+        // Verify contracting dim sizes match
+        bool contractSizesMatch = (lhsContractingDims.size() == rhsContractingDims.size());
+        int64_t contractProduct = 1;
+        if (contractSizesMatch) {
+            for (size_t i = 0; i < lhsContractingDims.size(); ++i) {
+                int64_t ls = [lhsShape[(NSUInteger)lhsContractingDims[i]] integerValue];
+                int64_t rs = [rhsShape[(NSUInteger)rhsContractingDims[i]] integerValue];
+                if (ls != rs) {
+                    contractSizesMatch = false;
+                    break;
+                }
+                contractProduct *= ls;
+            }
+        }
+
+        if (contractSizesMatch) {
+            // Collect sizes
+            llvm::SmallVector<int64_t> batchSizes;
+            int64_t batchProduct = 1;
+            for (auto bd : lhsBatchDims) {
+                int64_t s = [lhsShape[(NSUInteger)bd] integerValue];
+                batchSizes.push_back(s);
+                batchProduct *= s;
+            }
+
+            llvm::SmallVector<int64_t> lhsFreeSizes, rhsFreeSizes;
+            int64_t lhsFreeProduct = 1, rhsFreeProduct = 1;
+            for (NSUInteger d = 0; d < lhsRank; ++d) {
+                if (!lhsBatchSet.count(d) && !lhsContractSet.count(d)) {
+                    int64_t s = [lhsShape[d] integerValue];
+                    lhsFreeSizes.push_back(s);
+                    lhsFreeProduct *= s;
+                }
+            }
+            for (NSUInteger d = 0; d < rhsRank; ++d) {
+                if (!rhsBatchSet.count(d) && !rhsContractSet.count(d)) {
+                    int64_t s = [rhsShape[d] integerValue];
+                    rhsFreeSizes.push_back(s);
+                    rhsFreeProduct *= s;
+                }
+            }
+
+            // Transpose LHS to [batch, free, contract]
+            NSMutableArray<NSNumber*>* lhsPerm = [NSMutableArray array];
+            for (auto bd : lhsBatchDims) [lhsPerm addObject:@(bd)];
+            for (NSUInteger d = 0; d < lhsRank; ++d) {
+                if (!lhsBatchSet.count(d) && !lhsContractSet.count(d))
+                    [lhsPerm addObject:@(d)];
+            }
+            for (auto cd : lhsContractingDims) [lhsPerm addObject:@(cd)];
+
+            MPSGraphTensor* lhsT = lhs;
+            if (!IsIdentityPerm(lhsPerm, lhsRank)) {
+                lhsT = [ctx.graph transposeTensor:lhs permutation:lhsPerm name:nil];
+            }
+
+            // Transpose RHS to [batch, contract, free]
+            NSMutableArray<NSNumber*>* rhsPerm = [NSMutableArray array];
+            for (auto bd : rhsBatchDims) [rhsPerm addObject:@(bd)];
+            for (auto cd : rhsContractingDims) [rhsPerm addObject:@(cd)];
+            for (NSUInteger d = 0; d < rhsRank; ++d) {
+                if (!rhsBatchSet.count(d) && !rhsContractSet.count(d))
+                    [rhsPerm addObject:@(d)];
+            }
+
+            MPSGraphTensor* rhsT = rhs;
+            if (!IsIdentityPerm(rhsPerm, rhsRank)) {
+                rhsT = [ctx.graph transposeTensor:rhs permutation:rhsPerm name:nil];
+            }
+
+            // Reshape to 3D: [B, M, K] × [B, K, N]
+            // When no batch dims, batchProduct is 1 (initialized value).
+            lhsT = [ctx.graph reshapeTensor:lhsT
+                                   withShape:@[@(batchProduct), @(lhsFreeProduct), @(contractProduct)]
+                                        name:nil];
+            rhsT = [ctx.graph reshapeTensor:rhsT
+                                   withShape:@[@(batchProduct), @(contractProduct), @(rhsFreeProduct)]
+                                        name:nil];
+
+            result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhsT
+                                                      secondaryTensor:rhsT
+                                                                 name:nil];
+
+            // Reshape to output: [batch..., lhs_free..., rhs_free...]
+            NSMutableArray<NSNumber*>* outputShape = [NSMutableArray array];
+            for (int64_t s : batchSizes) [outputShape addObject:@(s)];
+            for (int64_t s : lhsFreeSizes) [outputShape addObject:@(s)];
+            for (int64_t s : rhsFreeSizes) [outputShape addObject:@(s)];
+            result = [ctx.graph reshapeTensor:result withShape:outputShape name:nil];
+        }
+    }
+
+    // Scalar broadcast: one or both operands are scalars with no contracting dims.
+    if (!result && lhsContractingDims.empty() && rhsContractingDims.empty() &&
+        lhsBatchDims.empty() && rhsBatchDims.empty() && (lhsRank == 0 || rhsRank == 0)) {
+        result = [ctx.graph multiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+    }
+
     if (!result) {
-        MPS_LOG_WARN(
-            "dot_general with complex contracting/batch dims, falling back to simple matmul. "
-            "LHS contracting: %lld, RHS contracting: %lld\n",
-            lhsContractingDims.empty() ? -1 : lhsContractingDims[0],
-            rhsContractingDims.empty() ? -1 : rhsContractingDims[0]);
-        result = [ctx.graph matrixMultiplicationWithPrimaryTensor:lhs secondaryTensor:rhs name:nil];
+        return ProcessResult::Error(
+            "dot_general: unsupported dimension configuration (LHS rank " +
+            std::to_string(lhsRank) + ", RHS rank " + std::to_string(rhsRank) + ")");
     }
 
     return Result(ctx, result, "dot_general");

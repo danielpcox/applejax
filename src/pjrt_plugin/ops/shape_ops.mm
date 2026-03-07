@@ -660,17 +660,22 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
         return Result(ctx, gathered, "gather");
     }
 
-    // Handle multi-index point gather pattern (e.g., x[arange(n), arange(n)] for diagonal):
+    // Handle multi-index point gather pattern:
     // - indices: [N, k] where each row is a k-dimensional coordinate
     // - index_vector_dim is the last dimension
     // - collapsed_slice_dims matches start_index_map (same set of dims)
     // - all mapped slice_sizes are 1
-    // - offset_dims is empty (pure point gather)
+    // - offset_dims may be empty (pure point gather) or non-empty (with offset/batch dims)
     // - no batching dimensions
+    //
+    // Examples:
+    //   Pure point gather: x[arange(n), arange(n)] for diagonal
+    //     offset_dims=[], collapsed=[0,1], start_index_map=[0,1], slice_sizes=[1,1]
+    //   Gather with offset: jnp.diagonal(a, axis1=-1, axis2=-2) on [3,2,2] tensor
+    //     offset_dims=[0], collapsed=[1,2], start_index_map=[1,2], slice_sizes=[3,1,1]
     if (operandBatchingDims.empty() && startIndicesBatchingDims.empty() &&
         indexVectorDim == (int64_t)indicesRank - 1 &&
-        collapsedSliceDims.size() == startIndexMap.size() && offsetDims.empty() &&
-        startIndexMap.size() > 1) {
+        collapsedSliceDims.size() == startIndexMap.size() && startIndexMap.size() > 1) {
         // Verify collapsed_slice_dims and start_index_map contain the same dims
         llvm::SmallVector<int64_t> sortedCollapsed(collapsedSliceDims.begin(),
                                                    collapsedSliceDims.end());
@@ -691,23 +696,211 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
         }
 
         if (dimsMatch && allOnes) {
-            // Check if startIndexMap covers all dims [0, ..., rank-1]
-            bool coversAllDims = (startIndexMap.size() == operand.shape.count);
-            if (coversAllDims) {
-                for (NSUInteger d = 0; d < operand.shape.count; ++d) {
-                    if (sortedMap[d] != (int64_t)d) {
-                        coversAllDims = false;
+            NSUInteger operandRank = operand.shape.count;
+
+            // Identify which operand dims are indexed vs offset
+            llvm::SmallDenseSet<int64_t, 8> indexedDimSet(sortedMap.begin(), sortedMap.end());
+
+            // Check if indexed dims are contiguous (required for flatten approach)
+            bool indexedDimsContiguous = true;
+            for (size_t i = 1; i < sortedMap.size(); ++i) {
+                if (sortedMap[i] != sortedMap[i - 1] + 1) {
+                    indexedDimsContiguous = false;
+                    break;
+                }
+            }
+
+            if (!indexedDimsContiguous) {
+                return ProcessResult::Error(
+                    "gather: multi-index pattern requires contiguous indexed dims");
+            }
+
+            if (offsetDims.empty()) {
+                // Pure point gather: all dims are indexed
+                bool coversAllDims = (startIndexMap.size() == operandRank);
+                if (coversAllDims) {
+                    for (NSUInteger d = 0; d < operandRank; ++d) {
+                        if (sortedMap[d] != (int64_t)d) {
+                            coversAllDims = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (coversAllDims) {
+                    // Indices are [N, rank] — use gatherND directly
+                    MPSGraphTensor* ndIndices = EnsureInt32(ctx.graph, startIndices);
+                    MPSGraphTensor* gathered = SafeGatherND(ctx.graph, operand, ndIndices, 0);
+                    return Result(ctx, gathered, "gather");
+                }
+            }
+
+            // Gather with offset dimensions: some dims pass through, others are point-gathered.
+            // Strategy: transpose operand so offset dims come first, then flatten indexed dims,
+            // compute flat indices from multi-dim index coordinates, and gather along the flat axis.
+
+            // Build permutation: offset dims first, then indexed dims
+            llvm::SmallVector<int64_t> perm;
+            llvm::SmallVector<int64_t> offsetOperandDims;
+            for (NSUInteger d = 0; d < operandRank; ++d) {
+                if (!indexedDimSet.count(d)) {
+                    perm.push_back(d);
+                    offsetOperandDims.push_back(d);
+                }
+            }
+            for (int64_t d : sortedMap) {
+                perm.push_back(d);
+            }
+
+            // Check if permutation is identity (no transpose needed)
+            bool needsTranspose = false;
+            for (size_t i = 0; i < perm.size(); ++i) {
+                if (perm[i] != (int64_t)i) {
+                    needsTranspose = true;
+                    break;
+                }
+            }
+
+            MPSGraphTensor* transposed = operand;
+            if (needsTranspose) {
+                NSMutableArray<NSNumber*>* permArr = [NSMutableArray array];
+                for (int64_t p : perm) {
+                    [permArr addObject:@(p)];
+                }
+                transposed = [ctx.graph transposeTensor:operand
+                                            permutation:permArr
+                                                   name:nil];
+            }
+
+            // Flatten the indexed dimensions into one.
+            // After transpose, shape is [offset_dim0, ..., offset_dimK, idx_dim0, ..., idx_dimM]
+            NSMutableArray<NSNumber*>* flatShape = [NSMutableArray array];
+            int64_t flatIndexedSize = 1;
+            for (NSUInteger d = 0; d < operandRank; ++d) {
+                if (d < offsetOperandDims.size()) {
+                    [flatShape addObject:transposed.shape[d]];
+                } else {
+                    flatIndexedSize *= [transposed.shape[d] integerValue];
+                }
+            }
+            [flatShape addObject:@(flatIndexedSize)];
+
+            MPSGraphTensor* flatOperand = [ctx.graph reshapeTensor:transposed
+                                                         withShape:flatShape
+                                                              name:nil];
+
+            // Convert multi-dim indices to flat indices using strides.
+            // indices shape: [N, k] where k = number of indexed dims
+            // After transpose, indexed dims are in sorted (ascending) order.
+            // Compute strides in sorted order, then map back to startIndexMap order.
+            llvm::SmallVector<int64_t> sortedDimSizes;
+            for (int64_t d : sortedMap) {
+                sortedDimSizes.push_back([operand.shape[(NSUInteger)d] integerValue]);
+            }
+
+            // Compute row-major strides for the sorted indexed dims
+            llvm::SmallVector<int64_t> sortedStrides(sortedMap.size(), 1);
+            for (int i = (int)sortedMap.size() - 2; i >= 0; --i) {
+                sortedStrides[i] = sortedStrides[i + 1] * sortedDimSizes[i + 1];
+            }
+
+            // Map strides back to startIndexMap order: for each index column i,
+            // find where startIndexMap[i] sits in sortedMap to get the correct stride.
+            llvm::SmallVector<int64_t> strides(startIndexMap.size());
+            for (size_t i = 0; i < startIndexMap.size(); ++i) {
+                for (size_t j = 0; j < sortedMap.size(); ++j) {
+                    if (sortedMap[j] == startIndexMap[i]) {
+                        strides[i] = sortedStrides[j];
                         break;
                     }
                 }
             }
 
-            if (coversAllDims) {
-                // Indices are [N, rank] — use gatherND directly
-                MPSGraphTensor* ndIndices = EnsureInt32(ctx.graph, startIndices);
-                MPSGraphTensor* gathered = SafeGatherND(ctx.graph, operand, ndIndices, 0);
-                return Result(ctx, gathered, "gather");
+            MPSGraphTensor* indicesInt = EnsureInt32(ctx.graph, startIndices);
+
+            // Compute flat_index = sum(indices[:, i] * stride[i]) for each index point
+            MPSGraphTensor* flatIndices = nil;
+            for (size_t i = 0; i < strides.size(); ++i) {
+                // Extract the i-th column of indices: indices[:, i]
+                // indices shape is [N, k], so slice along dim 1
+                NSMutableArray<NSNumber*>* starts = [NSMutableArray array];
+                NSMutableArray<NSNumber*>* ends = [NSMutableArray array];
+                NSMutableArray<NSNumber*>* stridesArr = [NSMutableArray array];
+                for (NSUInteger d = 0; d < indicesRank; ++d) {
+                    if (d == (NSUInteger)indexVectorDim) {
+                        [starts addObject:@(i)];
+                        [ends addObject:@(i + 1)];
+                    } else {
+                        [starts addObject:@0];
+                        [ends addObject:indicesInt.shape[d]];
+                    }
+                    [stridesArr addObject:@1];
+                }
+                MPSGraphTensor* col = [ctx.graph sliceTensor:indicesInt
+                                                   starts:starts
+                                                     ends:ends
+                                                  strides:stridesArr
+                                                     name:nil];
+                // Squeeze the index vector dimension: [N,1] -> [N]
+                NSMutableArray<NSNumber*>* squeezedShape = [NSMutableArray array];
+                for (NSUInteger d = 0; d < indicesRank; ++d) {
+                    if (d != (NSUInteger)indexVectorDim) {
+                        [squeezedShape addObject:col.shape[d]];
+                    }
+                }
+                col = [ctx.graph reshapeTensor:col withShape:squeezedShape name:nil];
+
+                MPSGraphTensor* strideT =
+                    [ctx.graph constantWithScalar:(double)strides[i]
+                                         dataType:MPSDataTypeInt32];
+                MPSGraphTensor* term = [ctx.graph multiplicationWithPrimaryTensor:col
+                                                                  secondaryTensor:strideT
+                                                                            name:nil];
+                if (flatIndices == nil) {
+                    flatIndices = term;
+                } else {
+                    flatIndices = [ctx.graph additionWithPrimaryTensor:flatIndices
+                                                       secondaryTensor:term
+                                                                  name:nil];
+                }
             }
+
+            // Gather along the flattened indexed axis
+            NSUInteger gatherAxis = offsetOperandDims.size();
+
+            // Reshape flatIndices for broadcasting: add size-1 dims for offset dims
+            // then broadcast to match operand shape in all non-gather dimensions
+            NSMutableArray<NSNumber*>* gatherIndicesShape = [NSMutableArray array];
+            for (NSUInteger d = 0; d < gatherAxis; ++d) {
+                [gatherIndicesShape addObject:flatOperand.shape[d]];
+            }
+            for (NSUInteger d = 0; d < flatIndices.shape.count; ++d) {
+                [gatherIndicesShape addObject:flatIndices.shape[d]];
+            }
+
+            // First reshape to add dims, then broadcast
+            NSMutableArray<NSNumber*>* unsqueezedShape = [NSMutableArray array];
+            for (NSUInteger d = 0; d < gatherAxis; ++d) {
+                [unsqueezedShape addObject:@1];
+            }
+            for (NSUInteger d = 0; d < flatIndices.shape.count; ++d) {
+                [unsqueezedShape addObject:flatIndices.shape[d]];
+            }
+            MPSGraphTensor* reshapedIndices = [ctx.graph reshapeTensor:flatIndices
+                                                             withShape:unsqueezedShape
+                                                                  name:nil];
+            reshapedIndices = [ctx.graph broadcastTensor:reshapedIndices
+                                                toShape:gatherIndicesShape
+                                                   name:nil];
+
+            MPSGraphTensor* gathered = SafeGatherAlongAxis(ctx.graph, (NSInteger)gatherAxis,
+                                                           flatOperand, reshapedIndices);
+
+            // Reshape to expected output shape
+            NSArray<NSNumber*>* outputShape = GetOutputShape(ctx.op);
+            gathered = [ctx.graph reshapeTensor:gathered withShape:outputShape name:nil];
+
+            return Result(ctx, gathered, "gather");
         }
     }
 
