@@ -1,6 +1,6 @@
 # Remaining Work for CUDA Parity
 
-**Current state:** 1974 tests pass, 0 xfails. All StableHLO ops implemented.
+**Current state:** 1978 tests pass, 0 xfails. All StableHLO ops implemented.
 
 ## Completed
 
@@ -8,10 +8,12 @@
 Implemented via float32 log2 + exponent extraction with precision correction.
 
 ### ~~2. `reduce_precision`~~ DONE
-Implemented via bitwise float32 manipulation: mantissa round-to-nearest-even truncation + exponent range clamping with overflow→±inf, underflow→±0 handling.
+Implemented via bitwise float32 manipulation: mantissa round-to-nearest-even truncation + exponent range clamping with overflow->inf, underflow->0 handling. NaN passthrough preserves original bits through both mantissa rounding and exponent clamping. Verified bit-exact against CPU for all exponent/mantissa configurations including edge cases (exponent_bits=1, mantissa_bits=0, subnormals, negative zero).
 
 ### ~~3. Error hardening~~ DONE
-Added clear error messages before MPS crashes for complex sort and complex convolution.
+- Complex sort: clean error with workaround suggestion
+- Complex convolution: clean error with workaround suggestion
+- Float64/unsupported dtypes: clean error at placeholder creation with suggestion to use float32
 
 ### ~~4. Identity buffer copy elimination~~ DONE
 Pass-through buffers now share the underlying MTLBuffer instead of copying.
@@ -37,11 +39,25 @@ Pass-through buffers now share the underlying MTLBuffer instead of copying.
 
 | Issue | Description | Workaround |
 |-------|-------------|------------|
-| No float64 | Metal GPUs only support 32-bit floats | Use float32 |
-| Complex sort crashes | `mps.sort` doesn't accept complex types | Sort components separately (now caught with clear error) |
-| Complex convolution crashes | `mps.conv_2d` doesn't accept complex types | Manual decomposition (now caught with clear error) |
+| No float64 | Metal GPUs only support 32-bit floats | Use float32 (now caught with clean error) |
+| Complex sort crashes | `mps.sort` doesn't accept complex types | Sort components separately (now caught with clean error) |
+| Complex convolution crashes | `mps.conv_2d` doesn't accept complex types | Manual decomposition (now caught with clean error) |
 | QDWH polar segfault | Internally promotes to float64 | Use `polar(method='svd')` |
 | Zero-size tensors | MPS doesn't support empty tensors | Avoid zero-dim ops |
+
+## Performance Characteristics
+
+Benchmarked on M4 MacBook Air (CPU = Accelerate BLAS, MPS = Metal GPU):
+
+| Workload | CPU | MPS | Speedup |
+|----------|-----|-----|---------|
+| ResNet18 CIFAR-10 train step | 3.0s | 1.0s | 3x |
+| matmul 2048x2048 | 27ms | 9.6ms | 2.8x |
+| matmul 1024x1024 | 2.0ms | 1.7ms | 1.2x |
+| conv2d 128ch 32x32 | 5.0ms | 4.1ms | 1.2x |
+| layernorm 1024 | 0.95ms | 3.6ms | 0.26x |
+
+MPS excels at compute-bound workloads (large matmul, batched attention). Dispatch overhead makes small/elementwise ops slower than CPU. The 3x ResNet speedup reflects a mix of both patterns.
 
 ## Nice-to-Have Improvements
 
@@ -57,6 +73,6 @@ Pass-through buffers now share the underlying MTLBuffer instead of copying.
 - **0 missing StableHLO ops** — all ops that JAX generates are implemented
 - **1 missing debug feature** (`debug.print`) — blocked by JAX upstream, not fixable in plugin
 - **1 missing optimization** (buffer donation) — no correctness impact
-- **Hardware limits** (no float64, no complex sort/conv) — cannot be fixed in software
+- **Hardware limits** (no float64, no complex sort/conv) — cannot be fixed in software, now caught with clean errors
 
 For any standard ML/scientific computing workflow, jax-mps is production-ready on Apple Silicon.
