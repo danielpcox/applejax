@@ -135,6 +135,23 @@ inline MPSGraphTensor* SafeGatherND(MPSGraph* graph, MPSGraphTensor* updatesTens
     return FinalizeIntegerTensor(graph, result, originalType, needsReverse, is64Bit);
 }
 
+// Clamp gather indices to valid range [0, dimSize-1] along the given axis.
+// This matches XLA/CPU behavior where out-of-bounds gather indices are clamped.
+inline MPSGraphTensor* ClampGatherIndices(MPSGraph* graph, MPSGraphTensor* indicesTensor,
+                                           MPSGraphTensor* updatesTensor, NSUInteger axis) {
+    NSNumber* dimSize = updatesTensor.shape[axis];
+    int64_t rawMax = [dimSize longLongValue] - 1;
+    int64_t maxIdx = rawMax > 0 ? rawMax : 0;
+    MPSGraphTensor* zero = [graph constantWithScalar:0
+                                            dataType:indicesTensor.dataType];
+    MPSGraphTensor* maxVal = [graph constantWithScalar:0.0 + maxIdx
+                                              dataType:indicesTensor.dataType];
+    return [graph clampWithTensor:indicesTensor
+                     minValueTensor:zero
+                     maxValueTensor:maxVal
+                               name:nil];
+}
+
 // Safe wrapper for gatherWithUpdatesTensor (axis-based gather)
 inline MPSGraphTensor* SafeGather(MPSGraph* graph, MPSGraphTensor* updatesTensor,
                                   MPSGraphTensor* indicesTensor, NSUInteger axis,
@@ -146,6 +163,9 @@ inline MPSGraphTensor* SafeGather(MPSGraph* graph, MPSGraphTensor* updatesTensor
         MPSGraphTensor* imagResult = SafeGather(graph, imag, indicesTensor, axis, batchDimensions);
         return [graph complexTensorWithRealTensor:realResult imaginaryTensor:imagResult name:nil];
     }
+
+    // Clamp indices to valid range (matches XLA/CPU behavior)
+    indicesTensor = ClampGatherIndices(graph, indicesTensor, updatesTensor, axis);
 
     MPSDataType originalType;
     bool needsReverse = false;
@@ -172,6 +192,9 @@ inline MPSGraphTensor* SafeGatherAlongAxis(MPSGraph* graph, NSInteger axis,
         MPSGraphTensor* imagResult = SafeGatherAlongAxis(graph, axis, imag, indicesTensor);
         return [graph complexTensorWithRealTensor:realResult imaginaryTensor:imagResult name:nil];
     }
+
+    // Clamp indices to valid range (matches XLA/CPU behavior)
+    indicesTensor = ClampGatherIndices(graph, indicesTensor, updatesTensor, (NSUInteger)axis);
 
     MPSDataType originalType;
     bool needsReverse = false;
