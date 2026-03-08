@@ -482,6 +482,26 @@ def test_dynamic_slice_clamps_oob_indices() -> None:
     numpy.testing.assert_allclose(numpy.asarray(mps_dus), numpy.asarray(cpu_dus), atol=1e-6)
 
 
+def test_gather_clamps_oob_indices() -> None:
+    """Regression test: gather (via jnp.take) must clamp out-of-bounds indices.
+    XLA/CPU clamps OOB gather indices; MPS must match this behavior."""
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+
+    mps = jax.devices("mps")[0]
+    cpu = jax.devices("cpu")[0]
+
+    x = jnp.arange(64, dtype=jnp.float32).reshape(16, 4)
+    # Index 100 is far OOB (should clamp to 15), -1 is negative (should clamp to 0)
+    indices = jnp.array([0, 5, 100, -1, 3])
+
+    with jax.default_device(cpu):
+        cpu_r = jnp.take(jax.device_put(x, cpu), jax.device_put(indices, cpu), axis=0, mode="clip")
+    with jax.default_device(mps):
+        mps_r = jnp.take(jax.device_put(x, mps), jax.device_put(indices, mps), axis=0, mode="clip")
+    numpy.testing.assert_allclose(numpy.asarray(mps_r), numpy.asarray(cpu_r), atol=1e-6)
+
+
 @pytest.fixture(autouse=True, scope="module")
 def assert_all_ops_tested():
     yield
