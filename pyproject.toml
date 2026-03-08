@@ -6,10 +6,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = [
-    "equinox>=0.13.5",
     "jax>=0.9.0,<0.10",
     "jaxlib>=0.9.0,<0.10",
-    "optax>=0.2.6",
 ]
 keywords = ["jax", "metal", "mps", "apple", "gpu", "machine-learning"]
 classifiers = [
@@ -56,8 +54,10 @@ ctcache = { git = "https://github.com/matus-chochlik/ctcache.git" }
 [dependency-groups]
 dev = [
     "ctcache",
+    "equinox>=0.13.5",
     "flax>=0.10.7",
     "numpyro>=0.20.0",
+    "optax>=0.2.6",
     "pre-commit>=4.5.1",
     "pyright>=1.1.408",
     "pytest",

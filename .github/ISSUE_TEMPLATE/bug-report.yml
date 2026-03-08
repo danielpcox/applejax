@@ -1,0 +1,45 @@
+name: Bug report
+description: Report incorrect results, crashes, or other unexpected behavior.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: code-snippet
+    attributes:
+      label: Code to reproduce
+      description: A minimal code snippet that demonstrates the issue.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: error-output
+    attributes:
+      label: Error output
+      description: The full error message or traceback, if any.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: jax-mps version
+      description: Output of `python -c "import jax_mps; print(jax_mps.__version__)"` or the pip-installed version.
+      placeholder: "0.9.7"
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Your Mac model and chip (e.g., MacBook Pro M3 Max).
+      placeholder: "MacBook Air M4"
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Output of `sw_vers -productVersion`.
+      placeholder: "15.3"

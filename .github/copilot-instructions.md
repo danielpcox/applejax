@@ -74,6 +74,17 @@ MPSDataType mpsType;
 if (mlirType.isF32()) mpsType = MPSDataTypeFloat32;  // Use type_utils instead
 ```
 
+- Use `GetInputTensor(ctx, index)` and `Result(ctx, tensor, "name")` helpers.
+
+```cpp
+// Correct
+MPSGraphTensor* input = GetInputTensor(ctx, 0);
+return Result(ctx, output, "my_op");
+
+// Incorrect - manual context access
+auto* input = ctx.values[op->getOperand(0).getAsOpaquePointer()];  // Use GetInputTensor
+```
+
 ## Testing Guidelines
 
 - Every op requires an `OperationTestConfig` in `tests/configs/`.
@@ -81,46 +92,34 @@ if (mlirType.isF32()) mpsType = MPSDataTypeFloat32;  // Use type_utils instead
 - Flag any `@pytest.mark.skip` or `@pytest.mark.xfail` without maintainer approval.
 
 ```python
-# Required pattern for each op
+# Required pattern for each op — positional args, factory functions
 OperationTestConfig(
-    func=jnp.tanh,
-    args=[lambda rng: rng.standard_normal((3, 4))],
-    seed=42,
+    jnp.tanh,
+    lambda key: random.normal(key, (3, 4)),
 )
 ```
 
-- `differentiable_argnums=()` is only valid when no arguments are truly differentiable (e.g., integer/boolean ops). Flag uses that skip gradient tests for ops with float inputs.
+- `differentiable_argnums=()` is only valid when no arguments are truly differentiable (e.g., integer/boolean ops, or patterns where the gradient generates unsupported scatter/control flow). Flag uses that skip gradient tests without justification.
 
 ```python
 # Correct - bitwise ops on integers have no gradients
-OperationTestConfig(func=jnp.bitwise_and, ..., differentiable_argnums=())
+OperationTestConfig(jnp.bitwise_and, ..., differentiable_argnums=())
+
+# Correct - gradient generates unsupported scatter pattern on MPS
+OperationTestConfig(lambda x, v: x.at[1:-1].set(v), ..., differentiable_argnums=())
 
 # Incorrect - tanh has differentiable float input, must test gradients
-OperationTestConfig(func=jnp.tanh, ..., differentiable_argnums=())  # Flag this
+OperationTestConfig(jnp.tanh, ..., differentiable_argnums=())  # Flag this
 ```
 
 - Test configs should exercise the op's behavior, not just prove it runs. Flag configs that only test a single shape or ignore the op's parameters. If an op takes an `axis` argument, test different axes. If it supports batching, test batched inputs. If it has configuration kwargs, vary them.
-
-## Common Mistakes
-
-- **Not using helpers**: Use `GetInputTensor()` and `Result()` instead of manual ValueMap manipulation.
-
-```cpp
-// Correct
-MPSGraphTensor* input = GetInputTensor(values, op, 0);
-return Result(values, op, output, "my_op");
-
-// Incorrect - manual ValueMap access
-auto* input = values[op->getOperand(0).getAsOpaquePointer()];  // Use GetInputTensor
-values[op->getResult(0).getAsOpaquePointer()] = output;  // Use Result
-```
 
 ## Review Checklist
 
 - Changes confined to `src/pjrt_plugin/ops/` and `tests/configs/`
 - Handler uses PascalCase
 - Uses `REGISTER_*` macros, no new registries
-- Uses `GetInputTensor()` and `Result()` helpers
+- Uses `GetInputTensor(ctx, i)` and `Result(ctx, tensor, "name")` helpers
 - Test config present in `tests/configs/`
 - No modifications to core infrastructure files
 - No unexplained skip/xfail markers

@@ -26,7 +26,7 @@ Time per step (second half): 0.991
 
 ## What Works
 
-**All JAX operations are supported**, verified across 1978 tests covering all major categories:
+**All JAX operations are supported**, verified across 2000+ tests covering all major categories:
 
 | Category | Status | Notes |
 |----------|--------|-------|
@@ -57,10 +57,10 @@ All operations work for both real (float32) and complex (complex64) inputs:
 
 | Operation | Function | Backend |
 |-----------|----------|---------|
-| Solve | `jnp.linalg.solve` | MPS native |
-| Inverse | `jnp.linalg.inv` | MPS native |
-| Cholesky | `jnp.linalg.cholesky` | MPS native (real), Accelerate cpotrf_ (complex) |
-| Triangular solve | `scipy.linalg.solve_triangular` | MPS native (real), Accelerate ctrsm_ (complex) |
+| Solve | `jnp.linalg.solve` | MPS Graph |
+| Inverse | `jnp.linalg.inv` | MPS Graph |
+| Cholesky | `jnp.linalg.cholesky` | MPS Graph (real), Accelerate cpotrf_ (complex) |
+| Triangular solve | `scipy.linalg.solve_triangular` | MPS Graph (real), Accelerate ctrsm_ (complex) |
 | QR | `jnp.linalg.qr` | Accelerate sgeqrf_/cgeqrf_ |
 | SVD | `jnp.linalg.svd` | Accelerate sgesdd_/cgesdd_ |
 | Eigendecomposition (symmetric) | `jnp.linalg.eigh` | Accelerate ssyevd_/cheevd_ |
@@ -91,6 +91,7 @@ These are **Metal/MPS hardware constraints**, not bugs in jax-mps:
 | No complex sort | `jnp.sort` on complex arrays crashes MPS | Sort real/imag parts separately |
 | No complex convolution | MPS conv ops don't support complex types | Decompose into real/imag convolutions manually |
 | No `jax.debug.print` | Debug printing inside JIT not supported | Use `jax.debug.callback` or print outside JIT |
+| Linalg inside control flow | QR, SVD, eigh, eig inside `scan`/`fori_loop`/`while_loop` crash (Accelerate-backed ops run on CPU, incompatible with MPS Graph control flow) | Restructure code to call these ops outside control flow |
 | No buffer donation | Memory optimization hint is ignored (warning only) | No impact on correctness, minor memory overhead |
 | `scipy.linalg.polar(method='qdwh')` crashes | QDWH algorithm promotes to float64 internally | Use `polar(method='svd')` instead |
 | Zero-size arrays | MPS doesn't support empty tensors | Avoid zero-dimension operations |
@@ -107,11 +108,10 @@ This project implements a [PJRT plugin](https://openxla.org/xla/pjrt) to offload
 
 | Layer | Examples | Count |
 |-------|----------|-------|
-| MPS Graph ops | add, matmul, conv, reduce, sort, FFT | ~60 |
-| CHLO ops | erf, top_k, acos, sinh | ~12 |
-| Native handlers (CPU via Metal command buffer) | cholesky, triangular_solve, QR, SVD, eigh, eig, Schur | ~10 |
-| Custom calls (LAPACK via Accelerate) | QR, SVD, eigh, eig, Schur | 5 |
-| Python lowering rules | eigh, svd, eig, schur → custom_call | 4 |
+| StableHLO graph ops | add, matmul, conv, reduce, sort, FFT, gather, scatter | 71 |
+| CHLO graph ops | erf, top_k, acos, sinh, erf_inv, next_after | 12 |
+| Native handlers (CPU via Accelerate) | cholesky, triangular_solve, eigh, SVD, eig, Schur | 6 |
+| Python lowering rules | eigh, svd, eig, schur → custom_call → native handler | 4 |
 
 ## Building from Source
 
@@ -128,7 +128,7 @@ brew install cmake ninja
 uv pip install -e .
 ```
 
-3. Run tests:
+3. Install dev dependencies (test runner, linters, ML frameworks used in examples) and run tests:
 
 ```bash
 uv sync --all-groups
@@ -167,14 +167,16 @@ jax-mps/
 │   │   ├── mps_executable.h/mm  # StableHLO compilation & execution
 │   │   └── ops/                 # Operation implementations
 │   │       ├── unary_ops.mm     # Element-wise unary operations
-│   │       ├── binary_ops.mm    # Element-wise binary operations
+│   │       ├── binary_ops.mm    # Binary operations, dot products, matmul
 │   │       ├── bitwise_ops.mm   # Bitwise operations
 │   │       ├── shape_ops.mm     # Gather, scatter, reshape, pad, etc.
 │   │       ├── reduction_ops.mm # Reduce, reduce_window, scan
 │   │       ├── linalg_ops.mm    # Cholesky, QR, SVD, eigh, eig, Schur
-│   │       ├── dot_ops.mm       # Dot products and matmul
+│   │       ├── convolution_ops.mm # Convolution
+│   │       ├── control_flow_ops.mm # cond, while, scan
 │   │       ├── fft_ops.mm       # FFT operations
 │   │       ├── sort_ops.mm      # Sort and top-k
+│   │       ├── tensor_creation_ops.mm # Constants, iota
 │   │       └── registry.h       # Op registration macros
 │   └── proto/                   # Protobuf definitions
 ├── tests/
