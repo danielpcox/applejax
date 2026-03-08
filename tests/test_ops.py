@@ -235,6 +235,46 @@ def test_dot_general_scalar_vector_gradient() -> None:
     numpy.testing.assert_allclose(gA_mps, gA_cpu, atol=1e-5)
 
 
+def test_dot_general_3d_1d_matmul() -> None:
+    """Regression test: 3D @ 1D matmul must not trigger rank-1 expansion
+    (designed for 2D only). The general fallback handles batched cases correctly."""
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+    mps = jax.devices("mps")[0]
+    cpu = jax.devices("cpu")[0]
+
+    # 3D @ 1D: batched matrix-vector product
+    A = jnp.ones((4, 3, 5))
+    v = jnp.ones((5,))
+    cpu_result = numpy.asarray(jax.jit(jnp.matmul, device=cpu)(A, v))
+    mps_result = numpy.asarray(jax.jit(jnp.matmul, device=mps)(
+        jax.device_put(A, mps), jax.device_put(v, mps)))
+    numpy.testing.assert_allclose(mps_result, cpu_result, atol=1e-5)
+
+    # 3D @ 1D inside lax.scan (exercises JIT + control flow + matmul interaction)
+    def scan_body(carry, x_row):
+        return carry + x_row @ v, None
+
+    def run_scan(A, v):
+        init = jnp.zeros(A.shape[1])
+        result, _ = jax.lax.scan(scan_body, init, A)
+        return result
+
+    cpu_scan = numpy.asarray(jax.jit(run_scan, device=cpu)(A, v))
+    mps_scan = numpy.asarray(jax.jit(run_scan, device=mps)(
+        jax.device_put(A, mps), jax.device_put(v, mps)))
+    numpy.testing.assert_allclose(mps_scan, cpu_scan, atol=1e-5)
+
+    # Gradient through 3D @ 1D
+    def loss_fn(v):
+        return jnp.sum(A @ v)
+
+    g_cpu = numpy.asarray(jax.jit(jax.grad(loss_fn), device=cpu)(v))
+    g_mps = numpy.asarray(jax.jit(jax.grad(loss_fn), device=mps)(
+        jax.device_put(v, mps)))
+    numpy.testing.assert_allclose(g_mps, g_cpu, atol=1e-5)
+
+
 @pytest.fixture(autouse=True, scope="module")
 def assert_all_ops_tested():
     yield

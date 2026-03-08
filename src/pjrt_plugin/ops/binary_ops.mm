@@ -162,7 +162,7 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
     bool lhsExpanded = false;
     bool rhsExpanded = false;
     if (lhsBatchDims.empty() && rhsBatchDims.empty() && (lhsRank == 1 || rhsRank == 1) &&
-        lhsRank >= 1 && rhsRank >= 1 &&
+        lhsRank >= 1 && rhsRank >= 1 && lhsRank <= 2 && rhsRank <= 2 &&
         lhsContractingDims.size() <= 1 && rhsContractingDims.size() <= 1) {
         bool isOuterProduct = lhsContractingDims.empty() && rhsContractingDims.empty();
         if (lhsRank == 1) {
@@ -175,6 +175,7 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
             }
             lhsExpanded = true;
             lhsRank = 2;
+            lhsShape = lhs.shape;
         }
         if (rhsRank == 1) {
             if (isOuterProduct) {
@@ -186,6 +187,7 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
             }
             rhsExpanded = true;
             rhsRank = 2;
+            rhsShape = rhs.shape;
         }
     }
 
