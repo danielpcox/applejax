@@ -532,11 +532,12 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
     NSArray<NSNumber*>* indicesShape = startIndices.shape;
     NSUInteger indicesRank = indicesShape.count;
 
-    // Handle batched gather pattern (e.g., from vmap over dynamic_index_in_dim):
+    // Handle batched gather pattern (e.g., from vmap over dynamic_index_in_dim or dynamic_slice):
     // Pattern: gather with batching dimensions where each batch element gathers independently
-    // Example: operand [3,10], indices [3,1]
-    //   - operand_batching_dims = [0], start_indices_batching_dims = [0]
-    //   - For each batch i, gather operand[i,:] at indices[i,0]
+    // Example 1 (point gather): operand [3,10], indices [3,1], slice_sizes=[1,1]
+    //   - For each batch i, gather operand[i, indices[i,0]]
+    // Example 2 (batched dynamic_slice): operand [5,10], indices [5,1], slice_sizes=[1,4]
+    //   - For each batch i, gather operand[i, indices[i,0]:indices[i,0]+4]
     // Also handles batched gather with collapsed dims and offset dims (e.g., from batched LU).
     if (!operandBatchingDims.empty() && !startIndicesBatchingDims.empty() &&
         operandBatchingDims.size() == startIndicesBatchingDims.size() &&
@@ -544,6 +545,8 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
         indexVectorDim == (int64_t)indicesRank - 1 &&
         [indicesShape[indicesRank - 1] integerValue] == 1) {
         int64_t gatherAxis = startIndexMap[0];
+        auto sliceSizes = gatherOp.getSliceSizes();
+        int64_t sliceLen = sliceSizes[gatherAxis];
 
         // Compute total gather points N from indices dims between batch and index_vector_dim.
         // Indices shape: [batch..., N..., 1] where N dims are the gather dimensions.
@@ -553,16 +556,63 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
             numGatherPoints *= [indicesShape[i] integerValue];
         }
 
-        // Build indices shape for reshape: [batch..., N] (squeeze the trailing 1).
-        // Then build broadcast shape matching operand rank:
-        //   - batch dims get batch sizes
-        //   - gather axis gets N
-        //   - other dims (offset dims) get operand sizes (for broadcast)
+        // Squeeze the trailing 1 from indices: [batch..., N..., 1] -> [batch..., N...]
         NSMutableArray<NSNumber*>* squeezedShape = [NSMutableArray array];
         for (NSUInteger i = 0; i < indicesRank - 1; ++i) {
             [squeezedShape addObject:indicesShape[i]];
         }
+        MPSGraphTensor* squeezedIndices = [ctx.graph reshapeTensor:startIndices
+                                                          withShape:squeezedShape
+                                                               name:nil];
+        squeezedIndices = EnsureInt32(ctx.graph, squeezedIndices);
 
+        // If slice length > 1, build iota offsets: indices[i] + [0, 1, ..., sliceLen-1]
+        // This converts a batched dynamic_slice into a batched gather with explicit indices.
+        if (sliceLen > 1) {
+            // Create iota [0, 1, ..., sliceLen-1]
+            MPSGraphTensor* iota = [ctx.graph coordinateAlongAxis:0
+                                                        withShape:@[@(sliceLen)]
+                                                             name:nil];
+            iota = [ctx.graph castTensor:iota toType:MPSDataTypeInt32 name:nil];
+
+            // Reshape squeezedIndices to [..., 1] and iota to [1..., sliceLen] for broadcast
+            NSMutableArray<NSNumber*>* idxBroadcastShape = [NSMutableArray array];
+            NSMutableArray<NSNumber*>* iotaBroadcastShape = [NSMutableArray array];
+            for (NSUInteger i = 0; i < squeezedShape.count; ++i) {
+                [idxBroadcastShape addObject:squeezedShape[i]];
+                [iotaBroadcastShape addObject:@1];
+            }
+            [idxBroadcastShape addObject:@1];
+            [iotaBroadcastShape addObject:@(sliceLen)];
+
+            squeezedIndices = [ctx.graph reshapeTensor:squeezedIndices
+                                             withShape:idxBroadcastShape
+                                                  name:nil];
+            iota = [ctx.graph reshapeTensor:iota withShape:iotaBroadcastShape name:nil];
+
+            // Broadcast and add: result shape [batch..., N..., sliceLen]
+            NSMutableArray<NSNumber*>* combinedShape = [NSMutableArray array];
+            for (NSUInteger i = 0; i < squeezedShape.count; ++i) {
+                [combinedShape addObject:squeezedShape[i]];
+            }
+            [combinedShape addObject:@(sliceLen)];
+
+            squeezedIndices = [ctx.graph broadcastTensor:squeezedIndices
+                                                 toShape:combinedShape
+                                                    name:nil];
+            iota = [ctx.graph broadcastTensor:iota toShape:combinedShape name:nil];
+            squeezedIndices = [ctx.graph additionWithPrimaryTensor:squeezedIndices
+                                                   secondaryTensor:iota
+                                                              name:nil];
+            // Now squeezedIndices has shape [batch..., N..., sliceLen]
+            // Update numGatherPoints to include slice length
+            numGatherPoints *= sliceLen;
+        }
+
+        // Build broadcast shape matching operand rank:
+        //   - batch dims get batch sizes
+        //   - gather axis gets numGatherPoints (N * sliceLen or just N)
+        //   - other dims get 1 (expanded) / operand size (broadcast)
         NSMutableArray<NSNumber*>* expandedShape = [NSMutableArray array];
         NSMutableArray<NSNumber*>* broadcastShape = [NSMutableArray array];
         NSUInteger operandRank = operand.shape.count;
@@ -581,17 +631,14 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
                 [expandedShape addObject:@(numGatherPoints)];
                 [broadcastShape addObject:@(numGatherPoints)];
             } else {
-                // For gatherAlongAxis, indices must match operand shape
-                // in all dimensions except the gather axis
                 [expandedShape addObject:@1];
                 [broadcastShape addObject:operand.shape[d]];
             }
         }
 
-        MPSGraphTensor* reshapedIndices = [ctx.graph reshapeTensor:startIndices
+        MPSGraphTensor* reshapedIndices = [ctx.graph reshapeTensor:squeezedIndices
                                                          withShape:expandedShape
                                                               name:nil];
-        reshapedIndices = EnsureInt32(ctx.graph, reshapedIndices);
         reshapedIndices = [ctx.graph broadcastTensor:reshapedIndices
                                              toShape:broadcastShape
                                                 name:nil];

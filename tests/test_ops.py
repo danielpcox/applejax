@@ -376,6 +376,30 @@ def test_depthwise_conv_gradient() -> None:
     numpy.testing.assert_allclose(numpy.asarray(g2_mps_k), numpy.asarray(g2_cpu_k), atol=1e-4)
 
 
+def test_vmap_dynamic_slice() -> None:
+    """Regression test: vmap over dynamic_slice produces a batched gather with
+    slice_sizes > 1. The gather handler must build iota offsets from the start
+    index rather than treating it as a point gather."""
+    if TEST_MODE == "cpu":
+        pytest.skip("MPS-specific test skipped in CPU-only mode")
+    from jax import lax
+
+    mps = jax.devices("mps")[0]
+    cpu = jax.devices("cpu")[0]
+
+    key = jax.random.PRNGKey(42)
+    xs = jax.random.normal(key, (5, 10), dtype=jnp.float32)
+    starts = jnp.array([0, 1, 2, 3, 4])
+
+    def slice_one(x, s):
+        return lax.dynamic_slice(x, (s,), (4,))
+
+    cpu_result = numpy.asarray(jax.jit(jax.vmap(slice_one), device=cpu)(xs, starts))
+    mps_result = numpy.asarray(jax.jit(jax.vmap(slice_one), device=mps)(
+        jax.device_put(xs, mps), jax.device_put(starts, mps)))
+    numpy.testing.assert_allclose(mps_result, cpu_result, atol=1e-5)
+
+
 @pytest.fixture(autouse=True, scope="module")
 def assert_all_ops_tested():
     yield
