@@ -347,17 +347,17 @@ name = "jax-mps"
 version = "0.9.7"
 source = { editable = "." }
 dependencies = [
-    { name = "equinox" },
     { name = "jax" },
     { name = "jaxlib" },
-    { name = "optax" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "ctcache" },
+    { name = "equinox" },
     { name = "flax" },
     { name = "numpyro" },
+    { name = "optax" },
     { name = "pre-commit" },
     { name = "pyright" },
     { name = "pytest" },
@@ -368,17 +368,17 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "equinox", specifier = ">=0.13.5" },
     { name = "jax", specifier = ">=0.9.0,<0.10" },
     { name = "jaxlib", specifier = ">=0.9.0,<0.10" },
-    { name = "optax", specifier = ">=0.2.6" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "ctcache", git = "https://github.com/matus-chochlik/ctcache.git" },
+    { name = "equinox", specifier = ">=0.13.5" },
     { name = "flax", specifier = ">=0.10.7" },
     { name = "numpyro", specifier = ">=0.20.0" },
+    { name = "optax", specifier = ">=0.2.6" },
     { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "pyright", specifier = ">=1.1.408" },
     { name = "pytest" },
