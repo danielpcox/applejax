@@ -1916,6 +1916,85 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
                 "scatter: general fallback requires contiguous scatterDimsToOperandDims");
         }
 
+        // Special case: dynamic_update_slice-style scatter.
+        // When insertedWindowDims is empty, the update tensor has the same rank as
+        // the operand and the indices specify a start position for placing the
+        // update window (like dynamic_update_slice but expressed as scatter).
+        // Convert to coordinate-based scatter using the same approach as
+        // HandleDynamicUpdateSlice.
+        if (insertedWindowDims.empty() && updateWindowDims.size() == updates.shape.count) {
+            NSUInteger updRank = updates.shape.count;
+            NSArray<NSNumber*>* updShape = updates.shape;
+            NSMutableArray<MPSGraphTensor*>* indexTensors = [NSMutableArray array];
+
+            for (NSUInteger dim = 0; dim < updRank; dim++) {
+                // Create coordinate tensor (0, 1, ..., size-1) along this dim
+                MPSGraphTensor* coords = [ctx.graph coordinateAlongAxis:(NSInteger)dim
+                                                              withShape:updShape
+                                                                   name:nil];
+                coords = EnsureInt32(ctx.graph, coords);
+
+                // If this operand dim is addressed by the index, add the start offset
+                for (NSUInteger k = 0; k < K; k++) {
+                    if (scatterDimsToOperandDims[k] == (int64_t)dim) {
+                        // Extract start index for this dim from indices tensor
+                        // (indices shape is [..., K] after earlier reshaping)
+                        MPSGraphTensor* startIdx =
+                            [ctx.graph sliceTensor:scatterIndices
+                                         dimension:(NSInteger)(indicesRank - 1)
+                                             start:(NSInteger)k
+                                            length:1
+                                              name:nil];
+
+                        // Reshape to [1, 1, ..., 1] for broadcasting with coords
+                        NSMutableArray<NSNumber*>* scalarShape = [NSMutableArray array];
+                        for (NSUInteger d = 0; d < updRank; d++) {
+                            [scalarShape addObject:@1];
+                        }
+                        startIdx = [ctx.graph reshapeTensor:startIdx
+                                                  withShape:scalarShape
+                                                       name:nil];
+                        startIdx = EnsureInt32(ctx.graph, startIdx);
+
+                        // Clamp: max(0, min(start, dim_size - update_size))
+                        int64_t dimSize = [input.shape[dim] integerValue];
+                        int64_t updateSize = [updShape[dim] integerValue];
+                        int64_t maxStart = dimSize - updateSize;
+                        if (maxStart < 0) maxStart = 0;
+
+                        MPSGraphTensor* zero =
+                            [ctx.graph constantWithScalar:0
+                                                dataType:MPSDataTypeInt32];
+                        MPSGraphTensor* maxVal =
+                            [ctx.graph constantWithScalar:maxStart
+                                                dataType:MPSDataTypeInt32];
+                        startIdx = [ctx.graph clampWithTensor:startIdx
+                                             minValueTensor:zero
+                                             maxValueTensor:maxVal
+                                                       name:nil];
+
+                        coords = [ctx.graph additionWithPrimaryTensor:coords
+                                                      secondaryTensor:startIdx
+                                                                 name:nil];
+                        break;
+                    }
+                }
+
+                [indexTensors addObject:coords];
+            }
+
+            // Stack to form [update_shape..., rank] indices
+            MPSGraphTensor* fullIndices =
+                [ctx.graph stackTensors:indexTensors
+                                  axis:(NSInteger)updRank
+                                  name:nil];
+
+            MPSGraphScatterMode mode = GetScatterMode(scatterOp);
+            MPSGraphTensor* result =
+                SafeScatterND(ctx.graph, input, updates, fullIndices, 0, mode);
+            return Result(ctx, result, "scatter");
+        }
+
         // Verify insertedWindowDims matches the scattered operand dims
         bool insertedMatch = insertedWindowDims.size() == K;
         if (insertedMatch) {

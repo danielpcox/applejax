@@ -130,6 +130,37 @@ def make_slice_op_configs():
                 name="partial_index_scatter_add_3d_single",
                 differentiable_argnums=(),
             ),
+            # Window scatter (dynamic_update_slice-style): x.at[1:-1, 1:-1].set(val)
+            # These generate scatter with insertedWindowDims=[] where the update
+            # is a window placed at a start position given by the indices.
+            OperationTestConfig(
+                lambda x, val: x.at[1:-1, 1:-1].set(val),
+                lambda key: jnp.zeros((5, 5), dtype=jnp.float32),
+                lambda key: jnp.ones((3, 3), dtype=jnp.float32),
+                name="window_scatter_set_2d",
+                differentiable_argnums=(),
+            ),
+            OperationTestConfig(
+                lambda x, val: x.at[1:-1, 1:-1].add(val),
+                lambda key: jnp.ones((5, 5), dtype=jnp.float32),
+                lambda key: jnp.ones((3, 3), dtype=jnp.float32) * 2.0,
+                name="window_scatter_add_2d",
+                differentiable_argnums=(),
+            ),
+            OperationTestConfig(
+                lambda x, val: x.at[1:-1, 1:-1, 1:-1].set(val),
+                lambda key: jnp.zeros((6, 6, 6), dtype=jnp.float32),
+                lambda key: jnp.ones((4, 4, 4), dtype=jnp.float32) * 3.0,
+                name="window_scatter_set_3d",
+                differentiable_argnums=(),
+            ),
+            OperationTestConfig(
+                lambda x, val: x.at[1:4, :].set(val),
+                lambda key: jnp.zeros((5, 8), dtype=jnp.float32),
+                lambda key: jnp.ones((3, 8), dtype=jnp.float32) * 5.0,
+                name="window_scatter_partial_dim",
+                differentiable_argnums=(),
+            ),
             OperationTestConfig(
                 lambda x: x.at[0].set(1.0),
                 lambda key: random.normal(key, (10,)),
