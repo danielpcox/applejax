@@ -95,6 +95,41 @@ def make_slice_op_configs():
                 lambda key: jnp.array(9.0, dtype=jnp.float32),
                 name="full_index_scatter_mixed",
             ),
+            # Partial-index scatter: x.at[i,j].add(1d_val) on 3D tensor
+            # Regression test: scatter with N=1 and trailing window dims
+            # differentiable_argnums=() because gradient generates scatter
+            # patterns that crash MPS (hardware limitation)
+            OperationTestConfig(
+                lambda x, val: x.at[1, 2].add(val),
+                lambda key: jnp.zeros((4, 4, 4), dtype=jnp.float32),
+                lambda key: jnp.ones(4, dtype=jnp.float32),
+                name="partial_index_scatter_add_3d",
+                differentiable_argnums=(),
+            ),
+            # Partial-index scatter: x.at[i,j].set(1d_val) on 3D tensor
+            OperationTestConfig(
+                lambda x, val: x.at[1, 2].set(val),
+                lambda key: jnp.zeros((4, 4, 4), dtype=jnp.float32),
+                lambda key: jnp.ones(4, dtype=jnp.float32) * 3.0,
+                name="partial_index_scatter_set_3d",
+                differentiable_argnums=(),
+            ),
+            # Partial-index scatter on 4D: x.at[i,j].add(2d_val)
+            OperationTestConfig(
+                lambda x, val: x.at[1, 2].add(val),
+                lambda key: jnp.zeros((3, 4, 5, 6), dtype=jnp.float32),
+                lambda key: jnp.ones((5, 6), dtype=jnp.float32),
+                name="partial_index_scatter_add_4d",
+                differentiable_argnums=(),
+            ),
+            # Single partial index on 3D: x.at[i].add(2d_val)
+            OperationTestConfig(
+                lambda x, val: x.at[2].add(val),
+                lambda key: jnp.zeros((4, 3, 5), dtype=jnp.float32),
+                lambda key: jnp.ones((3, 5), dtype=jnp.float32),
+                name="partial_index_scatter_add_3d_single",
+                differentiable_argnums=(),
+            ),
             OperationTestConfig(
                 lambda x: x.at[0].set(1.0),
                 lambda key: random.normal(key, (10,)),

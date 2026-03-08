@@ -1950,8 +1950,10 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
 
         // Count leading window dims (window dims before the first scatter dim in updates).
         // These correspond to leading operand dims and become MPS batch dims.
+        // When updateScatterDims is empty (N=1, single scatter point), the leading
+        // window dims are the first mpsBatchDims dims, not all of them.
         NSUInteger leadingWindowDims =
-            updateScatterDims.empty() ? updatesRank : updateScatterDims[0];
+            updateScatterDims.empty() ? mpsBatchDims : updateScatterDims[0];
         if (leadingWindowDims != mpsBatchDims) {
             return ProcessResult::Error(
                 "scatter: general fallback requires leading update window dims "
@@ -2013,8 +2015,10 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         // Trailing window dims stay as-is.
         NSMutableArray<NSNumber*>* ndUpdatesShape = [NSMutableArray arrayWithArray:batchShape];
         [ndUpdatesShape addObject:@(N)];
+        // When updateScatterDims is empty (N=1), trailing window dims start
+        // after the leading batch dims (mpsBatchDims), not at the end.
         NSUInteger trailingStart =
-            updateScatterDims.empty() ? updatesRank : (NSUInteger)(updateScatterDims.back() + 1);
+            updateScatterDims.empty() ? mpsBatchDims : (NSUInteger)(updateScatterDims.back() + 1);
         NSArray<NSNumber*>* updatesShape = updates.shape;
         for (NSUInteger d = trailingStart; d < updatesRank; ++d) {
             [ndUpdatesShape addObject:updatesShape[d]];
