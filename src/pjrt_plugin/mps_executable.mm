@@ -131,11 +131,7 @@ static bool IsZeroSizedType(mlir::Type type) {
     auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(type);
     if (!tensorType)
         return false;
-    for (int64_t dim : tensorType.getShape()) {
-        if (dim == 0)
-            return true;
-    }
-    return false;
+    return llvm::any_of(tensorType.getShape(), [](int64_t dim) { return dim == 0; });
 }
 
 // Check if an operation produces any zero-sized result
@@ -271,7 +267,7 @@ static ProcessResult processOperations(HandlerContext& ctx, mlir::Block& block) 
             if (!HasZeroSizedResult(op)) {
                 // concatenate: drop zero-sized inputs
                 if (auto concatOp = mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op)) {
-                    int64_t concatDim = concatOp.getDimension();
+                    auto concatDim = static_cast<int64_t>(concatOp.getDimension());
                     NSMutableArray<MPSGraphTensor*>* nonZeroInputs = [NSMutableArray array];
                     for (unsigned i = 0; i < op->getNumOperands(); i++) {
                         if (!IsZeroSizedType(op->getOperand(i).getType())) {
@@ -413,7 +409,6 @@ static ProcessResult processOperations(HandlerContext& ctx, mlir::Block& block) 
                 if (unitDiagonal) {
                     // Get shape for eye matrix
                     NSArray<NSNumber*>* shape = tri.shape;
-                    NSInteger n = [shape[shape.count - 1] integerValue];
                     MPSGraphTensor* eye = [ctx.graph constantWithScalar:1.0
                                                                   shape:shape
                                                                dataType:tri.dataType];
@@ -510,9 +505,7 @@ bool MpsExecutable::BuildExecutionPlan() {
                         return;
                     std::string inner_name = inner->getName().getStringRef().str();
                     const OpHandler* h = OpRegistry::Find(inner_name);
-                    if (h && h->is_native()) {
-                        result = true;
-                    } else if (mlir::dyn_cast<mlir::func::CallOp>(inner)) {
+                    if ((h && h->is_native()) || mlir::dyn_cast<mlir::func::CallOp>(inner)) {
                         result = true;
                     } else if (auto ccOp = mlir::dyn_cast<mlir::stablehlo::CustomCallOp>(inner)) {
                         const OpHandler* ccH =
@@ -932,7 +925,7 @@ bool MpsExecutable::BuildExecutionPlan() {
                                 // concatenate: drop zero-sized inputs
                                 if (auto concatOp =
                                         mlir::dyn_cast<mlir::stablehlo::ConcatenateOp>(op)) {
-                                    int64_t concatDim = concatOp.getDimension();
+                                    auto concatDim = static_cast<int64_t>(concatOp.getDimension());
                                     NSMutableArray<MPSGraphTensor*>* nonZeroInputs =
                                         [NSMutableArray array];
                                     for (unsigned i = 0; i < op->getNumOperands(); i++) {

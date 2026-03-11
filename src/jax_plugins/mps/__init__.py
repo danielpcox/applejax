@@ -220,13 +220,13 @@ def _register_lowering_rules():
         # "mps". We register directly into the platform-specific lowerings dict.
         mps_lowerings = mlir._platform_specific_lowerings.setdefault("mps", {})
         mps_lowerings[lax_linalg.eigh_p] = mlir.LoweringRuleEntry(
-            _eigh_mps_lowering, True
+            _eigh_mps_lowering, True  # type: ignore[arg-type]
         )
         mps_lowerings[lax_linalg.svd_p] = mlir.LoweringRuleEntry(
-            _svd_mps_lowering, True
+            _svd_mps_lowering, True  # type: ignore[arg-type]
         )
         mps_lowerings[lax_linalg.eig_p] = mlir.LoweringRuleEntry(
-            _eig_mps_lowering, True
+            _eig_mps_lowering, True  # type: ignore[arg-type]
         )
 
         def _schur_mps_lowering(
@@ -257,7 +257,7 @@ def _register_lowering_rules():
             return results
 
         mps_lowerings[lax_linalg.schur_p] = mlir.LoweringRuleEntry(
-            _schur_mps_lowering, True
+            _schur_mps_lowering, True  # type: ignore[arg-type]
         )
     except Exception:
         pass  # Don't fail initialization if lowering registration fails
