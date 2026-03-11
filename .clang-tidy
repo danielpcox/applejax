@@ -39,6 +39,7 @@ Checks: >
   -readability-implicit-bool-conversion,
   -readability-magic-numbers,
   -readability-suspicious-call-argument,
+  -bugprone-narrowing-conversions,
 
 WarningsAsErrors: '*'
 

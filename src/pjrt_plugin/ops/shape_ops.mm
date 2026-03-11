@@ -1008,7 +1008,7 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
                 perm.push_back(d);
             }
             for (NSUInteger d = 0; d < operandRank; ++d) {
-                if (!indexedDimSet.count(d)) {
+                if (!indexedDimSet.contains(d)) {
                     perm.push_back(d);
                     offsetOperandDims.push_back(d);
                 }
@@ -1222,9 +1222,14 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
             NSUInteger outputRank = outputShape.count;
             // After squeezing single-point batch dim or unflattening,
             // numIndexDims reflects the actual index dims remaining in the gathered result.
-            NSUInteger numIndexDims =
-                singlePoint ? 0 : (flattenedBatch ? origBatchShape.count : flatIndices.shape.count);
-            NSUInteger numOffsetDims = offsetDims.size();
+            NSUInteger numIndexDims;
+            if (singlePoint) {
+                numIndexDims = 0;
+            } else if (flattenedBatch) {
+                numIndexDims = origBatchShape.count;
+            } else {
+                numIndexDims = flatIndices.shape.count;
+            }
 
             // Map output positions: offset dims go to specified positions,
             // index dims fill the rest in order.
@@ -1233,7 +1238,7 @@ static ProcessResult HandleGather(HandlerContext& ctx) {
             NSUInteger idxPos = 0;
             NSUInteger offPos = 0;
             for (NSUInteger d = 0; d < outputRank; ++d) {
-                if (offsetDimSet.count(d)) {
+                if (offsetDimSet.contains(d)) {
                     // This output position is an offset dim
                     [postPerm addObject:@(numIndexDims + offPos)];
                     offPos++;
@@ -1396,7 +1401,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
         // Compute scatter count N from non-batch dims of squeezed indices
         int64_t scatterN = 1;
         for (NSUInteger i = 0; i < scatterIdx.shape.count; ++i) {
-            if (!idxBatchDimSet.count(i)) {
+            if (!idxBatchDimSet.contains(i)) {
                 scatterN *= [scatterIdx.shape[i] integerValue];
             }
         }
@@ -1696,7 +1701,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
 
             // Build new shape: keep scatter dims (non-window) and window dims
             // except drop the window dim for the scatter axis (it's size 1)
-            for (size_t d = 0; d < (size_t)updatesShape.size(); ++d) {
+            for (size_t d = 0; d < updatesShape.size(); ++d) {
                 bool isScatterAxisWindow = false;
                 // Check if this update dim is the window dim for the scatter axis
                 for (size_t w = 0; w < updateWindowDimsSlice.size(); ++w) {
@@ -1800,7 +1805,6 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
             }
 
             if (N == 1) {
-                NSUInteger operandRank = input.shape.count;
                 NSUInteger K = scatterDimsToOperandDims.size();
 
                 // Find the real scatter dim: where updates window < operand dim
@@ -1976,7 +1980,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
             }
             // Then remaining dims
             for (NSUInteger d = 0; d < operandRank; ++d) {
-                if (d >= mpsBatchDims && !scatterSet.count(d)) {
+                if (d >= mpsBatchDims && !scatterSet.contains(d)) {
                     perm.push_back(d);
                 }
             }
@@ -2011,14 +2015,11 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
 
             llvm::SmallVector<int64_t> remappedInserted(insertedWindowDims.begin(),
                                                         insertedWindowDims.end());
-            for (size_t i = 0; i < remappedInserted.size(); ++i) {
-                remappedInserted[i] = dimRemap[remappedInserted[i]];
+            for (auto& dim : remappedInserted) {
+                dim = dimRemap[dim];
             }
             llvm::sort(remappedInserted);
             insertedWindowDims = remappedInserted;
-
-            // Now dims should be contiguous
-            contiguousDims = true;
         }
 
         // Special case: dynamic_update_slice-style scatter.
@@ -2064,9 +2065,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
                         // Clamp: max(0, min(start, dim_size - update_size))
                         int64_t dimSize = [input.shape[dim] integerValue];
                         int64_t updateSize = [updShape[dim] integerValue];
-                        int64_t maxStart = dimSize - updateSize;
-                        if (maxStart < 0)
-                            maxStart = 0;
+                        int64_t maxStart = std::max(dimSize - updateSize, (int64_t)0);
 
                         MPSGraphTensor* zero = [ctx.graph constantWithScalar:0
                                                                     dataType:MPSDataTypeInt32];
@@ -2117,9 +2116,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
             NSMutableArray<NSNumber*>* fullShape = [NSMutableArray array];
             NSUInteger windowIdx = 0;
             for (NSUInteger d = 0; d < operandRank; ++d) {
-                if (insertedSet.count(d)) {
-                    [fullShape addObject:@1];
-                } else if (windowIdx < updateWindowDims.size()) {
+                if (!insertedSet.contains(d) && windowIdx < updateWindowDims.size()) {
                     [fullShape addObject:updates.shape[updateWindowDims[windowIdx]]];
                     windowIdx++;
                 } else {
@@ -2162,9 +2159,7 @@ static ProcessResult HandleScatter(HandlerContext& ctx) {
 
                         int64_t dimSize = [input.shape[dim] integerValue];
                         int64_t updateSize = [updShape[dim] integerValue];
-                        int64_t maxStart = dimSize - updateSize;
-                        if (maxStart < 0)
-                            maxStart = 0;
+                        int64_t maxStart = std::max(dimSize - updateSize, (int64_t)0);
 
                         MPSGraphTensor* zero = [ctx.graph constantWithScalar:0
                                                                     dataType:MPSDataTypeInt32];

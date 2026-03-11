@@ -115,7 +115,6 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
     // MPS matmul only supports float/complex types. Cast integer inputs to float32,
     // perform the matmul, then cast back to the original output type.
     MPSDataType origLhsType = lhs.dataType;
-    MPSDataType origRhsType = rhs.dataType;
     bool needsIntCast = false;
     MPSDataType outputIntType = MPSDataTypeFloat32;
 
@@ -378,17 +377,19 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
                 batchProduct *= s;
             }
 
-            llvm::SmallVector<int64_t> lhsFreeSizes, rhsFreeSizes;
-            int64_t lhsFreeProduct = 1, rhsFreeProduct = 1;
+            llvm::SmallVector<int64_t> lhsFreeSizes;
+            llvm::SmallVector<int64_t> rhsFreeSizes;
+            int64_t lhsFreeProduct = 1;
+            int64_t rhsFreeProduct = 1;
             for (NSUInteger d = 0; d < lhsRank; ++d) {
-                if (!lhsBatchSet.count(d) && !lhsContractSet.count(d)) {
+                if (!lhsBatchSet.contains(d) && !lhsContractSet.contains(d)) {
                     int64_t s = [lhsShape[d] integerValue];
                     lhsFreeSizes.push_back(s);
                     lhsFreeProduct *= s;
                 }
             }
             for (NSUInteger d = 0; d < rhsRank; ++d) {
-                if (!rhsBatchSet.count(d) && !rhsContractSet.count(d)) {
+                if (!rhsBatchSet.contains(d) && !rhsContractSet.contains(d)) {
                     int64_t s = [rhsShape[d] integerValue];
                     rhsFreeSizes.push_back(s);
                     rhsFreeProduct *= s;
@@ -400,7 +401,7 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
             for (auto bd : lhsBatchDims)
                 [lhsPerm addObject:@(bd)];
             for (NSUInteger d = 0; d < lhsRank; ++d) {
-                if (!lhsBatchSet.count(d) && !lhsContractSet.count(d))
+                if (!lhsBatchSet.contains(d) && !lhsContractSet.contains(d))
                     [lhsPerm addObject:@(d)];
             }
             for (auto cd : lhsContractingDims)
@@ -418,7 +419,7 @@ static ProcessResult HandleDotGeneral(HandlerContext& ctx) {
             for (auto cd : rhsContractingDims)
                 [rhsPerm addObject:@(cd)];
             for (NSUInteger d = 0; d < rhsRank; ++d) {
-                if (!rhsBatchSet.count(d) && !rhsContractSet.count(d))
+                if (!rhsBatchSet.contains(d) && !rhsContractSet.contains(d))
                     [rhsPerm addObject:@(d)];
             }
 
